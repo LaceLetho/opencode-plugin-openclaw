@@ -6,7 +6,7 @@
   ],
   "openclaw": {
     "port": 9090,
-    "openclawWebhookUrl": "https://your-openclaw-server.com/webhook/opencode-results",
+    "openclawWebhookUrl": "http://localhost:18789/hooks/agent",
     "openclawApiKey": "${OPENCLAW_API_KEY}",
     "maxConcurrentTasks": 5
   }
