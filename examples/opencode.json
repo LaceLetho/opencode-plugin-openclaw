@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4-5",
+  "plugins": [
+    "@opencode-ai/plugin-openclaw"
+  ],
+  "openclaw": {
+    "port": 9090,
+    "openclawWebhookUrl": "https://your-openclaw-server.com/webhook/opencode-results",
+    "openclawApiKey": "${OPENCLAW_API_KEY}",
+    "maxConcurrentTasks": 5
+  }
+}
