@@ -61,6 +61,7 @@ Add to your `opencode.json`:
 |----------|-------------|---------|
 | `OPENCLAW_PORT` | Plugin HTTP server port | `9090` |
 | `OPENCLAW_API_KEY` | Default OpenClaw hooks token | - |
+| `LOG_LEVEL` | Log verbosity: `debug`, `info`, `warn`, `error` | `info` |
 
 ## How It Works
 
@@ -153,6 +154,39 @@ Content-Type: application/json
 This plugin is designed to work with `@laceletho/openclaw-opencode-cli`.
 
 **See the [CLI documentation](https://github.com/LaceLetho/openclaw-opencode-cli) for usage instructions.**
+
+## Logging
+
+The plugin outputs structured logs to stdout for Railway Dashboard visibility:
+
+### Log Levels
+
+Set `LOG_LEVEL` environment variable:
+
+```bash
+# Debug mode - detailed event tracking
+LOG_LEVEL=debug opencode serve
+
+# Info mode (default) - key events only
+LOG_LEVEL=info opencode serve
+
+# Error mode - errors only
+LOG_LEVEL=error opencode serve
+```
+
+### Log Format
+
+```
+2025-03-13T10:30:45.123Z [openclaw-plugin] [INFO] Plugin HTTP server started {"port":9090}
+2025-03-13T10:30:50.456Z [openclaw-plugin] [INFO] Callback registered successfully {"sessionId":"sess_abc123","totalRegistered":1}
+2025-03-13T10:31:15.789Z [openclaw-plugin] [INFO] Session status updated {"sessionId":"sess_abc123","previousStatus":"running","currentStatus":"completed"}
+2025-03-13T10:31:15.890Z [openclaw-plugin] [INFO] Sending callback to OpenClaw {"sessionId":"sess_abc123","callbackUrl":"http://localhost:18789/hooks/agent"}
+2025-03-13T10:31:16.012Z [openclaw-plugin] [INFO] Callback sent successfully {"sessionId":"sess_abc123","status":200,"duration":122}
+```
+
+### Railway Dashboard
+
+Logs are automatically captured. View them in your project's **Observability** tab.
 
 ## Testing
 
