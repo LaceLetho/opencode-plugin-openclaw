@@ -3,7 +3,13 @@ export interface OpenclawConfig {
     port?: number;
     openclawWebhookUrl?: string;
     openclawApiKey?: string;
-    maxConcurrentTasks?: number;
+}
+export interface CallbackConfig {
+    url: string;
+    apiKey?: string;
+    agentId?: string;
+    channel?: string;
+    deliver?: boolean;
 }
 declare module "@opencode-ai/plugin" {
     interface Config {

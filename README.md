@@ -118,13 +118,34 @@ Health check endpoint.
 
 The plugin subscribes to the following OpenCode events:
 
+### `message.part.updated`
+
+Triggered when a message part is created or updated. The plugin accumulates text content and tool outputs from these events to build the complete session result.
+
+### `message.part.delta`
+
+Triggered during streaming text generation. The plugin appends streaming deltas to the accumulated content.
+
 ### `session.updated`
 
-Triggered when any session is updated. The plugin checks if the session is registered and if its status is `completed` or `failed`, then sends the callback.
+Triggered when session metadata is updated. The plugin monitors the session status and sends the callback when the status becomes `completed` or `failed`.
+
+### `session.error`
+
+Triggered when a session encounters an error. The plugin marks the session as failed and includes error information in the callback.
 
 ### `session.deleted`
 
 Triggered when a session is deleted. The plugin removes the session from the callback registry.
+
+### Important: Event Data Limitations
+
+**`session.updated` events do NOT contain message content**. They only include session metadata (id, status, timestamps, etc.). The actual content is delivered through separate `message.part.*` events.
+
+The plugin automatically handles this by:
+1. Listening to `message.part.updated` and `message.part.delta` events
+2. Accumulating text and tool outputs in memory
+3. Including the accumulated content when sending the callback on `session.updated`
 
 ## Callback to OpenClaw
 

@@ -15,10 +15,17 @@ interface CallbackConfig {
   deliver?: boolean
 }
 
-// 内存中存储 session 到回调配置的映射
-const callbackRegistry = new Map<string, CallbackConfig>()
+interface SessionState {
+  config: CallbackConfig
+  status?: string
+  textParts: string[]
+  toolOutputs: Array<{ tool: string; output: string; error?: string }>
+  hasError: boolean
+  errorMessage?: string
+}
 
-// 插件级别的默认配置
+const sessionRegistry = new Map<string, SessionState>()
+
 let pluginConfig: OpenclawConfig = {
   port: 9090,
   openclawWebhookUrl: "",
@@ -34,67 +41,90 @@ const readBody = (req: any): Promise<string> => {
   })
 }
 
-const formatCallbackMessage = (session: any): string => {
-  const status = session.status === "completed" ? "completed" : "failed"
-  const result = session.result || session.messages?.slice(-1)[0]?.content || "(no output)"
-  const error = session.error
-
-  if (status === "failed" && error) {
-    return `Task failed: ${session.id}\n\nError:\n${error}`
+const formatCallbackMessage = (sessionId: string, state: SessionState): string => {
+  const lines: string[] = []
+  
+  if (state.hasError) {
+    lines.push(`Task failed: ${sessionId}`)
+    if (state.errorMessage) {
+      lines.push(`\nError:\n${state.errorMessage}`)
+    }
+  } else {
+    lines.push(`Task completed: ${sessionId}`)
   }
-
-  return `Task completed: ${session.id}\n\nResult:\n${result}`
+  
+  if (state.textParts.length > 0) {
+    lines.push("\nResult:")
+    lines.push(state.textParts.join(""))
+  }
+  
+  if (state.toolOutputs.length > 0) {
+    lines.push("\n\nTools executed:")
+    for (const tool of state.toolOutputs) {
+      lines.push(`\n[${tool.tool}]:`)
+      if (tool.error) {
+        lines.push(`  Error: ${tool.error}`)
+      } else {
+        lines.push(`  ${tool.output}`)
+      }
+    }
+  }
+  
+  return lines.join("\n")
 }
 
-const sendCallback = async (config: CallbackConfig, session: any): Promise<void> => {
+const sendCallback = async (sessionId: string, state: SessionState): Promise<void> => {
   const payload = {
-    message: formatCallbackMessage(session),
+    message: formatCallbackMessage(sessionId, state),
     name: "OpenCode Task",
-    agentId: config.agentId || "main",
+    agentId: state.config.agentId || "main",
     wakeMode: "now",
-    deliver: config.deliver ?? true,
-    channel: config.channel || "last",
+    deliver: state.config.deliver ?? true,
+    channel: state.config.channel || "last",
   }
 
   try {
-    const res = await fetch(config.url, {
+    const res = await fetch(state.config.url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+        ...(state.config.apiKey ? { Authorization: `Bearer ${state.config.apiKey}` } : {}),
       },
       body: JSON.stringify(payload),
     })
 
     if (!res.ok) {
-      console.error(`[openclaw] Callback failed for session ${session.id}: ${res.status} ${res.statusText}`)
+      console.error(`[openclaw] Callback failed for session ${sessionId}: ${res.status} ${res.statusText}`)
     } else {
-      console.log(`[openclaw] Callback sent for session: ${session.id}`)
+      console.log(`[openclaw] Callback sent for session: ${sessionId}`)
     }
   } catch (err) {
-    console.error(`[openclaw] Failed to send callback for session ${session.id}:`, err)
+    console.error(`[openclaw] Failed to send callback for session ${sessionId}:`, err)
   }
 }
 
+const handleSessionComplete = async (sessionId: string, state: SessionState) => {
+  console.log(`[openclaw] Session ${sessionId} ${state.hasError ? "failed" : "completed"}, sending callback...`)
+  await sendCallback(sessionId, state)
+  sessionRegistry.delete(sessionId)
+}
+
 export default async function OpenclawPlugin({}: PluginInput) {
-  // 启动 HTTP 服务器用于接收回调注册
   const server = createServer(async (req, res) => {
     const url = req.url || "/"
     const method = req.method || "GET"
 
     res.setHeader("Content-Type", "application/json")
 
-    // 健康检查端点
     if (url === "/health" && method === "GET") {
       res.writeHead(200)
       res.end(JSON.stringify({
         status: "ok",
-        registeredSessions: callbackRegistry.size,
+        registeredSessions: sessionRegistry.size,
       }))
       return
     }
 
-    // 注册回调端点 - CLI 调用此端点注册需要回调的 session
     if (url === "/register" && method === "POST") {
       try {
         const body = await readBody(req)
@@ -109,13 +139,17 @@ export default async function OpenclawPlugin({}: PluginInput) {
           return
         }
 
-        // 存储到注册表
-        callbackRegistry.set(sessionId, {
-          url: callbackConfig.url,
-          apiKey: callbackConfig.apiKey || pluginConfig.openclawApiKey,
-          agentId: callbackConfig.agentId || "main",
-          channel: callbackConfig.channel || "last",
-          deliver: callbackConfig.deliver ?? true,
+        sessionRegistry.set(sessionId, {
+          config: {
+            url: callbackConfig.url,
+            apiKey: callbackConfig.apiKey || pluginConfig.openclawApiKey,
+            agentId: callbackConfig.agentId || "main",
+            channel: callbackConfig.channel || "last",
+            deliver: callbackConfig.deliver ?? true,
+          },
+          textParts: [],
+          toolOutputs: [],
+          hasError: false,
         })
 
         console.log(`[openclaw] Registered callback for session: ${sessionId} -> ${callbackConfig.url}`)
@@ -130,12 +164,10 @@ export default async function OpenclawPlugin({}: PluginInput) {
       return
     }
 
-    // 未匹配的路由
     res.writeHead(404)
     res.end(JSON.stringify({ error: "Not found" }))
   })
 
-  // 启动服务器
   await new Promise<void>((resolve, reject) => {
     server.listen(pluginConfig.port, () => {
       console.log(`[openclaw] Plugin HTTP server listening on port ${pluginConfig.port}`)
@@ -144,9 +176,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
     server.on("error", reject)
   })
 
-  // 返回符合 OpenCode 插件规范的对象
   return {
-    // 配置更新处理
     config: async (cfg: { openclaw?: OpenclawConfig }) => {
       if (cfg.openclaw) {
         Object.assign(pluginConfig, cfg.openclaw)
@@ -154,35 +184,100 @@ export default async function OpenclawPlugin({}: PluginInput) {
       }
     },
 
-    // 核心：订阅 session 更新事件
+    "message.part.updated": async (event: any) => {
+      const part = event.part
+      if (!part?.sessionID) return
+
+      const state = sessionRegistry.get(part.sessionID)
+      if (!state) return
+
+      switch (part.type) {
+        case "text": {
+          if (part.text) {
+            state.textParts.push(part.text)
+          }
+          break
+        }
+        case "tool": {
+          if (part.state) {
+            switch (part.state.status) {
+              case "completed":
+                state.toolOutputs.push({
+                  tool: part.tool,
+                  output: part.state.output || "(no output)",
+                })
+                break
+              case "error":
+                state.hasError = true
+                state.toolOutputs.push({
+                  tool: part.tool,
+                  output: "",
+                  error: part.state.error || "Unknown error",
+                })
+                break
+            }
+          }
+          break
+        }
+        case "reasoning": {
+          break
+        }
+      }
+    },
+
+    "message.part.delta": async (event: any) => {
+      const { sessionID, field, delta } = event
+      if (!sessionID || field !== "text" || !delta) return
+
+      const state = sessionRegistry.get(sessionID)
+      if (!state) return
+
+      if (state.textParts.length > 0) {
+        state.textParts[state.textParts.length - 1] += delta
+      } else {
+        state.textParts.push(delta)
+      }
+    },
+
     "session.updated": async (event: any) => {
-      const session = event.session
-      if (!session?.id) return
+      const info = event.info
+      if (!info?.id) return
 
-      const config = callbackRegistry.get(session.id)
-      if (!config) return // 这个 session 没有注册回调
+      const state = sessionRegistry.get(info.id)
+      if (!state) return
 
-      // 检查 session 是否完成
-      if (session.status === "completed" || session.status === "failed") {
-        console.log(`[openclaw] Session ${session.id} ${session.status}, sending callback...`)
-        await sendCallback(config, session)
-        callbackRegistry.delete(session.id) // 清理注册表
+      state.status = info.status
+
+      if (info.status === "completed" || info.status === "failed") {
+        if (info.status === "failed") {
+          state.hasError = true
+        }
+        await handleSessionComplete(info.id, state)
       }
     },
 
-    // 清理：session 被删除时移除注册
+    "session.error": async (event: any) => {
+      const { sessionID, error } = event
+      if (!sessionID) return
+
+      const state = sessionRegistry.get(sessionID)
+      if (!state) return
+
+      state.hasError = true
+      state.errorMessage = error?.message || String(error)
+    },
+
     "session.deleted": async (event: any) => {
-      const sessionId = event.sessionId
-      if (callbackRegistry.has(sessionId)) {
+      const sessionId = event.info?.id || event.sessionId
+      if (sessionId && sessionRegistry.has(sessionId)) {
         console.log(`[openclaw] Session ${sessionId} deleted, removing callback registration`)
-        callbackRegistry.delete(sessionId)
+        sessionRegistry.delete(sessionId)
       }
     },
 
-    // 清理：插件卸载时关闭服务器
     dispose: async () => {
       server.close()
-      callbackRegistry.clear()
+      sessionRegistry.clear()
       console.log("[openclaw] Plugin disposed")
     },
   }
