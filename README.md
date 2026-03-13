@@ -43,21 +43,19 @@ npm install @laceletho/plugin-openclaw
 
 ## Configuration
 
-### OpenCode Plugin Configuration
+### Enable Plugin
 
 Add to your `opencode.json`:
 
 ```json
 {
-  "plugin": ["@laceletho/plugin-openclaw"],
-  "openclaw": {
-    "port": 9090,
-    "openclawApiKey": "your-openclaw-hooks-token"
-  }
+  "plugins": ["@laceletho/plugin-openclaw"]
 }
 ```
 
-### Environment Variables
+### Plugin Settings
+
+This plugin uses **environment variables** for configuration (OpenCode does not support custom fields in `opencode.json`):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
