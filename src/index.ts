@@ -358,31 +358,20 @@ export default async function OpenclawPlugin({}: PluginInput) {
       })
     },
 
-    "session.updated": async (event: any) => {
-      const info = event.info
-      if (!info?.id) return
+    "session.idle": async (event: any) => {
+      const sessionID = event.sessionID || event.properties?.sessionID
+      if (!sessionID) return
 
-      const state = sessionRegistry.get(info.id)
+      const state = sessionRegistry.get(sessionID)
       if (!state) return
 
-      const previousStatus = state.status
-      state.status = info.status
-
-      logger.info("Session status updated", {
-        sessionId: info.id,
-        previousStatus,
-        currentStatus: info.status,
+      logger.info("Session idle, triggering callback", {
+        sessionId: sessionID,
         hasText: state.textParts.length > 0,
         hasTools: state.toolOutputs.length > 0,
       })
 
-      if (info.status === "completed" || info.status === "failed") {
-        if (info.status === "failed") {
-          state.hasError = true
-          logger.warn("Session failed, triggering error callback", { sessionId: info.id })
-        }
-        await handleSessionComplete(info.id, state)
-      }
+      await handleSessionComplete(sessionID, state)
     },
 
     "session.error": async (event: any) => {
