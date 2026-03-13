@@ -359,11 +359,19 @@ export default async function OpenclawPlugin({}: PluginInput) {
     },
 
     "session.idle": async (event: any) => {
+      logger.info("Received session.idle event", { event: JSON.stringify(event) })
+
       const sessionID = event.sessionID || event.properties?.sessionID
-      if (!sessionID) return
+      if (!sessionID) {
+        logger.warn("No sessionID in session.idle event", { event })
+        return
+      }
 
       const state = sessionRegistry.get(sessionID)
-      if (!state) return
+      if (!state) {
+        logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
+        return
+      }
 
       logger.info("Session idle, triggering callback", {
         sessionId: sessionID,
