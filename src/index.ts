@@ -1,43 +1,28 @@
 import { createServer } from "http"
-import { EventEmitter } from "events"
+import type { PluginInput } from "@opencode-ai/plugin"
 
 export interface OpenclawConfig {
   port?: number
   openclawWebhookUrl?: string
   openclawApiKey?: string
-  maxConcurrentTasks?: number
 }
 
-interface Task {
-  id: string
-  prompt: string
-  callbackUrl: string
-  status: "pending" | "running" | "completed" | "failed"
-  result?: string
-  error?: string
-  sessionId?: string
-  createdAt: Date
-  updatedAt: Date
+interface CallbackConfig {
+  url: string
+  apiKey?: string
+  agentId?: string
+  channel?: string
+  deliver?: boolean
 }
 
-interface PluginInput {
-  client: {
-    session: {
-      create: () => Promise<any>
-      prompt: (pathParams: { path: { id: string } }, body: { content: string }) => Promise<any>
-    }
-  }
-}
+// 内存中存储 session 到回调配置的映射
+const callbackRegistry = new Map<string, CallbackConfig>()
 
-const tasks = new Map<string, Task>()
-let runningTasks = 0
-const events = new EventEmitter()
-
-const config = {
+// 插件级别的默认配置
+let pluginConfig: OpenclawConfig = {
   port: 9090,
   openclawWebhookUrl: "",
   openclawApiKey: "",
-  maxConcurrentTasks: 5
 }
 
 const readBody = (req: any): Promise<string> => {
@@ -49,190 +34,156 @@ const readBody = (req: any): Promise<string> => {
   })
 }
 
-const waitForSlot = (): Promise<void> => {
-  return new Promise((resolve) => {
-    const handler = () => {
-      events.off("slot-freed", handler)
-      resolve()
-    }
-    events.once("slot-freed", handler)
-  })
+const formatCallbackMessage = (session: any): string => {
+  const status = session.status === "completed" ? "completed" : "failed"
+  const result = session.result || session.messages?.slice(-1)[0]?.content || "(no output)"
+  const error = session.error
+
+  if (status === "failed" && error) {
+    return `Task failed: ${session.id}\n\nError:\n${error}`
+  }
+
+  return `Task completed: ${session.id}\n\nResult:\n${result}`
 }
 
-const notifyOpenclaw = async (task: Task): Promise<void> => {
-  if (!task.callbackUrl) return
-
+const sendCallback = async (config: CallbackConfig, session: any): Promise<void> => {
   const payload = {
-    taskId: task.id,
-    status: task.status,
-    result: task.result,
-    error: task.error,
-    sessionId: task.sessionId,
-    completedAt: task.updatedAt.toISOString()
+    message: formatCallbackMessage(session),
+    name: "OpenCode Task",
+    agentId: config.agentId || "main",
+    wakeMode: "now",
+    deliver: config.deliver ?? true,
+    channel: config.channel || "last",
   }
 
   try {
-    const res = await fetch(task.callbackUrl, {
+    const res = await fetch(config.url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(config.openclawApiKey ? { "Authorization": `Bearer ${config.openclawApiKey}` } : {})
+        ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
     })
 
     if (!res.ok) {
-      console.error(`[openclaw] Callback failed for task ${task.id}: ${res.status} ${res.statusText}`)
+      console.error(`[openclaw] Callback failed for session ${session.id}: ${res.status} ${res.statusText}`)
     } else {
-      console.log(`[openclaw] Callback sent for task: ${task.id}`)
+      console.log(`[openclaw] Callback sent for session: ${session.id}`)
     }
   } catch (err) {
-    console.error(`[openclaw] Failed to send callback for task ${task.id}:`, err)
+    console.error(`[openclaw] Failed to send callback for session ${session.id}:`, err)
   }
 }
 
-const OpenclawPlugin = async ({ client }: PluginInput) => {
+export default async function OpenclawPlugin({}: PluginInput) {
+  // 启动 HTTP 服务器用于接收回调注册
   const server = createServer(async (req, res) => {
     const url = req.url || "/"
     const method = req.method || "GET"
 
     res.setHeader("Content-Type", "application/json")
 
+    // 健康检查端点
     if (url === "/health" && method === "GET") {
       res.writeHead(200)
-      res.end(JSON.stringify({ status: "ok", tasks: tasks.size, running: runningTasks }))
+      res.end(JSON.stringify({
+        status: "ok",
+        registeredSessions: callbackRegistry.size,
+      }))
       return
     }
 
-    if (url === "/tasks" && method === "POST") {
+    // 注册回调端点 - CLI 调用此端点注册需要回调的 session
+    if (url === "/register" && method === "POST") {
       try {
         const body = await readBody(req)
-        const payload = JSON.parse(body) as { taskId: string; prompt: string; callbackUrl?: string }
+        const { sessionId, callbackConfig } = JSON.parse(body) as {
+          sessionId: string
+          callbackConfig: CallbackConfig
+        }
 
-        if (!payload.taskId || !payload.prompt) {
+        if (!sessionId || !callbackConfig?.url) {
           res.writeHead(400)
-          res.end(JSON.stringify({ error: "Missing required fields: taskId, prompt" }))
+          res.end(JSON.stringify({ error: "Missing required fields: sessionId, callbackConfig.url" }))
           return
         }
 
-        const task: Task = {
-          id: payload.taskId,
-          prompt: payload.prompt,
-          callbackUrl: payload.callbackUrl || config.openclawWebhookUrl,
-          status: "pending",
-          createdAt: new Date(),
-          updatedAt: new Date()
-        }
+        // 存储到注册表
+        callbackRegistry.set(sessionId, {
+          url: callbackConfig.url,
+          apiKey: callbackConfig.apiKey || pluginConfig.openclawApiKey,
+          agentId: callbackConfig.agentId || "main",
+          channel: callbackConfig.channel || "last",
+          deliver: callbackConfig.deliver ?? true,
+        })
 
-        tasks.set(task.id, task)
-        console.log(`[openclaw] Task received: ${task.id}`)
+        console.log(`[openclaw] Registered callback for session: ${sessionId} -> ${callbackConfig.url}`)
 
-        res.writeHead(202)
-        res.end(JSON.stringify({ taskId: task.id, status: "accepted" }))
-
-        const executeTask = async () => {
-          if (runningTasks >= config.maxConcurrentTasks) {
-            console.log(`[openclaw] Task ${task.id} queued (max concurrent reached)`)
-            await waitForSlot()
-          }
-
-          runningTasks++
-          task.status = "running"
-          task.updatedAt = new Date()
-
-          try {
-            console.log(`[openclaw] Executing task: ${task.id}`)
-
-            const sessionResult = await client.session.create()
-            const session = sessionResult.data || sessionResult
-            task.sessionId = session.id
-
-            const response = await client.session.prompt(
-              { path: { id: session.id } },
-              { content: task.prompt }
-            )
-            const message = response.data || response
-
-            task.status = "completed"
-            task.result = message.info?.content || message.content || JSON.stringify(message)
-            task.updatedAt = new Date()
-
-            console.log(`[openclaw] Task completed: ${task.id}`)
-
-            await notifyOpenclaw(task)
-          } catch (err) {
-            task.status = "failed"
-            task.error = err instanceof Error ? err.message : String(err)
-            task.updatedAt = new Date()
-
-            console.error(`[openclaw] Task failed: ${task.id}`, err)
-
-            await notifyOpenclaw(task)
-          } finally {
-            runningTasks--
-            events.emit("slot-freed")
-          }
-        }
-
-        executeTask()
+        res.writeHead(200)
+        res.end(JSON.stringify({ ok: true, sessionId }))
       } catch (err) {
-        console.error("[openclaw] Failed to handle task request:", err)
+        console.error("[openclaw] Failed to register callback:", err)
         res.writeHead(500)
         res.end(JSON.stringify({ error: "Internal server error" }))
       }
       return
     }
 
-    if (url.startsWith("/tasks/") && method === "GET") {
-      const taskId = url.split("/")[2]
-      const task = tasks.get(taskId)
-      if (!task) {
-        res.writeHead(404)
-        res.end(JSON.stringify({ error: "Task not found" }))
-        return
-      }
-
-      res.writeHead(200)
-      res.end(JSON.stringify({
-        taskId: task.id,
-        status: task.status,
-        result: task.result,
-        error: task.error,
-        createdAt: task.createdAt,
-        updatedAt: task.updatedAt
-      }))
-      return
-    }
-
+    // 未匹配的路由
     res.writeHead(404)
     res.end(JSON.stringify({ error: "Not found" }))
   })
 
+  // 启动服务器
   await new Promise<void>((resolve, reject) => {
-    server.listen(config.port, () => {
-      console.log(`[openclaw] Webhook server listening on port ${config.port}`)
+    server.listen(pluginConfig.port, () => {
+      console.log(`[openclaw] Plugin HTTP server listening on port ${pluginConfig.port}`)
       resolve()
     })
     server.on("error", reject)
   })
 
+  // 返回符合 OpenCode 插件规范的对象
   return {
+    // 配置更新处理
     config: async (cfg: { openclaw?: OpenclawConfig }) => {
-      const openclawCfg = cfg.openclaw
-      if (openclawCfg) {
-        Object.assign(config, openclawCfg)
-      }
-      if (!config.openclawWebhookUrl) {
-        console.log("[openclaw] No default callback URL configured")
+      if (cfg.openclaw) {
+        Object.assign(pluginConfig, cfg.openclaw)
+        console.log("[openclaw] Configuration updated")
       }
     },
 
+    // 核心：订阅 session 更新事件
+    "session.updated": async (event: any) => {
+      const session = event.session
+      if (!session?.id) return
+
+      const config = callbackRegistry.get(session.id)
+      if (!config) return // 这个 session 没有注册回调
+
+      // 检查 session 是否完成
+      if (session.status === "completed" || session.status === "failed") {
+        console.log(`[openclaw] Session ${session.id} ${session.status}, sending callback...`)
+        await sendCallback(config, session)
+        callbackRegistry.delete(session.id) // 清理注册表
+      }
+    },
+
+    // 清理：session 被删除时移除注册
+    "session.deleted": async (event: any) => {
+      const sessionId = event.sessionId
+      if (callbackRegistry.has(sessionId)) {
+        console.log(`[openclaw] Session ${sessionId} deleted, removing callback registration`)
+        callbackRegistry.delete(sessionId)
+      }
+    },
+
+    // 清理：插件卸载时关闭服务器
     dispose: async () => {
       server.close()
-      events.removeAllListeners()
+      callbackRegistry.clear()
       console.log("[openclaw] Plugin disposed")
-    }
+    },
   }
 }
-
-export default OpenclawPlugin

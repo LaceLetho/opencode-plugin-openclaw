@@ -1,41 +1,38 @@
 # @laceletho/plugin-openclaw
 
-OpenCode plugin for asynchronous task execution with OpenClaw callback support.
+OpenCode plugin for session callback support with OpenClaw. Subscribes to OpenCode events and sends webhooks to OpenClaw when registered sessions complete.
 
 ## Features
 
-- **Webhook Receiver**: HTTP endpoint to receive tasks from OpenClaw
-- **Async Task Queue**: Configurable concurrent task execution
-- **Automatic Callback**: Reports task results back to OpenClaw via webhook
-- **Session Integration**: Uses OpenCode's session API for task execution
+- **Event-Driven**: Subscribes to OpenCode `session.updated` events
+- **Callback Registration**: HTTP endpoint for CLI/tools to register callback needs
+- **Automatic Callback**: Sends webhooks to OpenClaw when sessions complete
+- **Session Tracking**: Tracks registered sessions and cleans up after callback
 
 ## Architecture
 
 ```
-┌─────────────┐      POST /tasks       ┌─────────────────────┐
-│   OpenClaw  │ ─────────────────────→ │  OpenclawPlugin     │
-│  (External) │                        │  (Webhook Server)   │
-└─────────────┘                        └──────────┬──────────┘
-                                                   │
-                           ┌───────────────────────┘
-                           │
-                           ▼
-                   ┌───────────────┐
-                   │  Task Queue   │
-                   └───────┬───────┘
-                           │
-                           ▼
-                   ┌───────────────┐
-                   │   OpenCode    │
-                   │   Session     │
-                   └───────┬───────┘
-                           │
-                           ▼
-                   ┌───────────────┐
-                   │   Callback    │
-                   │  to OpenClaw  │
-                   │  /hooks/agent │
-                   └───────────────┘
+┌─────────────────┐      POST /register     ┌─────────────────────┐
+│   CLI/Tool      │ ──────────────────────> │  OpenclawPlugin     │
+│  (External)     │   {sessionId, callback} │  (HTTP Server 9090) │
+└─────────────────┘                         └──────────┬──────────┘
+                                                       │
+                                                       │ stores in
+                                                       │ callbackRegistry
+                                                       │
+                                                       ▼
+                                            ┌─────────────────────┐
+                                            │  Subscribe to       │
+                                            │  session.updated    │
+                                            │  session.deleted    │
+                                            └──────────┬──────────┘
+                                                       │
+                                                       │ session completes
+                                                       ▼
+                                            ┌─────────────────────┐
+                                            │  Send callback to   │
+                                            │  OpenClaw /hooks    │
+                                            └─────────────────────┘
 ```
 
 ## Installation
@@ -55,67 +52,44 @@ Add to your `opencode.json`:
   "plugins": ["@laceletho/plugin-openclaw"],
   "openclaw": {
     "port": 9090,
-    "openclawWebhookUrl": "http://localhost:18789/hooks/agent",
-    "openclawApiKey": "your-openclaw-hooks-token",
-    "maxConcurrentTasks": 5
+    "openclawApiKey": "your-openclaw-hooks-token"
   }
 }
 ```
-
-### OpenClaw Configuration (Required)
-
-To receive webhook callbacks from this plugin, OpenClaw must have its **hooks system enabled**. Add this to your OpenClaw configuration file (`~/.openclaw/openclaw.json` or `openclaw.json`):
-
-```json
-{
-  "hooks": {
-    "enabled": true,
-    "token": "your-openclaw-hooks-token",
-    "path": "/hooks",
-    "allowedAgentIds": ["main", "hooks"],
-    "defaultSessionKey": "hook:opencode",
-    "allowRequestSessionKey": false,
-    "allowedSessionKeyPrefixes": ["hook:"]
-  }
-}
-```
-
-**Important security settings:**
-- `token`: Must match the `openclawApiKey` in the plugin config
-- `allowedAgentIds`: Restrict which agents can receive hook messages
-- `allowRequestSessionKey: false`: Prevents external callers from specifying session keys (recommended)
-- `allowedSessionKeyPrefixes`: When `allowRequestSessionKey` is false, OpenClaw generates session keys with these prefixes
 
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OPENCLAW_PORT` | Webhook server port | `9090` |
-| `OPENCLAW_WEBHOOK_URL` | OpenClaw hooks endpoint | `http://localhost:18789/hooks/agent` |
-| `OPENCLAW_API_KEY` | OpenClaw hooks token | - |
-| `OPENCLAW_MAX_CONCURRENT` | Max concurrent tasks | `5` |
+| `OPENCLAW_PORT` | Plugin HTTP server port | `9090` |
+| `OPENCLAW_API_KEY` | Default OpenClaw hooks token | - |
+
+## How It Works
+
+1. **Registration**: When a CLI/tool creates an OpenCode session and wants a callback, it sends a POST request to the plugin's `/register` endpoint with the session ID and callback configuration.
+
+2. **Event Subscription**: The plugin subscribes to OpenCode's `session.updated` and `session.deleted` events.
+
+3. **Callback Trigger**: When a registered session's status changes to `completed` or `failed`, the plugin automatically sends a webhook to the configured OpenClaw endpoint.
+
+4. **Cleanup**: After sending the callback (or when a session is deleted), the plugin removes the registration from memory.
 
 ## API Endpoints
 
-### POST /tasks
+### POST /register
 
-Submit a new task for execution.
+Register a session for callback when it completes.
 
 **Request:**
 ```json
 {
-  "taskId": "unique-task-id",
-  "prompt": "Write a Python function to calculate fibonacci numbers",
-  "callbackUrl": "http://localhost:18789/hooks/agent",
+  "sessionId": "sess_abc123",
   "callbackConfig": {
-    "name": "OpenCode Task",
+    "url": "http://localhost:18789/hooks/agent",
+    "apiKey": "your-openclaw-token",
     "agentId": "main",
-    "deliver": true,
-    "channel": "telegram"
-  },
-  "metadata": {
-    "userId": "user-123",
-    "priority": "high"
+    "channel": "last",
+    "deliver": true
   }
 }
 ```
@@ -123,23 +97,8 @@ Submit a new task for execution.
 **Response:**
 ```json
 {
-  "taskId": "unique-task-id",
-  "status": "accepted"
-}
-```
-
-### GET /tasks/:taskId
-
-Check task status.
-
-**Response:**
-```json
-{
-  "taskId": "unique-task-id",
-  "status": "completed",
-  "result": "Here's the Python function...",
-  "createdAt": "2024-03-12T10:00:00Z",
-  "updatedAt": "2024-03-12T10:05:00Z"
+  "ok": true,
+  "sessionId": "sess_abc123"
 }
 ```
 
@@ -151,155 +110,100 @@ Health check endpoint.
 ```json
 {
   "status": "ok",
-  "tasks": 3,
-  "running": 2
+  "registeredSessions": 5
 }
 ```
 
+## OpenCode Events
+
+The plugin subscribes to the following OpenCode events:
+
+### `session.updated`
+
+Triggered when any session is updated. The plugin checks if the session is registered and if its status is `completed` or `failed`, then sends the callback.
+
+### `session.deleted`
+
+Triggered when a session is deleted. The plugin removes the session from the callback registry.
+
 ## Callback to OpenClaw
 
-When a task completes, the plugin sends a POST request to OpenClaw's `/hooks/agent` endpoint:
+When a registered session completes, the plugin sends a POST request to the configured URL:
 
-### OpenClaw /hooks/agent Payload Format
-
-The plugin sends task results to OpenClaw using its native hooks format:
+### Payload Format
 
 ```json
 {
-  "message": "Task completed: File processing finished\n\nResults:\nHere's the Python function...",
+  "message": "Task completed: sess_abc123\n\nResult:\nHere's the code...",
   "name": "OpenCode Task",
   "agentId": "main",
   "wakeMode": "now",
   "deliver": true,
-  "channel": "last",
-  "model": "anthropic/claude-sonnet-4-5",
-  "timeoutSeconds": 300
+  "channel": "last"
 }
 ```
 
 **Authentication:**
 ```
-Authorization: Bearer <openclawApiKey>
+Authorization: Bearer <apiKey>
 Content-Type: application/json
 ```
 
-### OpenClaw /hooks/agent Endpoint Reference
+## Usage with CLI
 
-OpenClaw's `/hooks/agent` endpoint accepts the following payload structure:
+This plugin is designed to work with `openclaw-opencode-cli`:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `message` | string | Yes | The message to send to the agent |
-| `name` | string | Yes | Display name for this hook invocation |
-| `agentId` | string | No | Target agent ID (falls back to default) |
-| `wakeMode` | string | No | `"now"` or `"next-heartbeat"` (default: `"now"`) |
-| `sessionKey` | string | No | Session identifier (requires `allowRequestSessionKey: true`) |
-| `deliver` | boolean | No | Whether to deliver response to messaging channel (default: `true`) |
-| `channel` | string | No | Target channel: `"last"`, `"telegram"`, `"slack"`, `"discord"`, etc. |
-| `to` | string | No | Recipient identifier for the channel |
-| `model` | string | No | Model override (e.g., `"anthropic/claude-sonnet-4-5"`) |
-| `thinking` | string | No | Thinking level: `"low"`, `"medium"`, `"high"` |
-| `timeoutSeconds` | number | No | Maximum duration for the agent run |
+```bash
+# 1. Start OpenCode with the plugin
+opencode serve
 
-## Usage Example
+# 2. From another terminal, dispatch a task with CLI
+export OPENCODE_URL=http://localhost:4096
+export OPENCODE_PASSWORD=your-password
+export OPENCLAW_CALLBACK_URL=http://localhost:18789/hooks/agent
 
-### 1. Configure OpenClaw
+openclaw-opencode task "Write a Python function"
 
-Edit your `~/.openclaw/openclaw.json`:
+# 3. Plugin automatically sends callback when session completes
+```
+
+## OpenClaw Configuration
+
+To receive webhook callbacks, OpenClaw must have its **hooks system enabled**. Add this to your OpenClaw configuration:
 
 ```json
 {
   "hooks": {
     "enabled": true,
-    "token": "my-secure-webhook-token",
+    "token": "your-openclaw-hooks-token",
     "path": "/hooks",
-    "allowedAgentIds": ["main"]
-  },
-  "channels": {
-    "telegram": {
-      "botToken": "${TELEGRAM_BOT_TOKEN}",
-      "allowFrom": ["*"]
-    }
+    "allowedAgentIds": ["main", "hooks"]
   }
 }
 ```
 
-### 2. Start OpenCode with the plugin
+## Testing
+
+Test the plugin health:
 
 ```bash
-export OPENCLAW_WEBHOOK_URL="http://localhost:18789/hooks/agent"
-export OPENCLAW_API_KEY="my-secure-webhook-token"
-opencode serve
+curl http://localhost:9090/health
 ```
 
-### 3. Send a task from OpenClaw
+Test callback registration:
 
 ```bash
-curl -X POST http://localhost:9090/tasks \
+curl -X POST http://localhost:9090/register \
   -H "Content-Type: application/json" \
   -d '{
-    "taskId": "task-001",
-    "prompt": "Create a React component for a todo list",
-    "callbackUrl": "http://localhost:18789/hooks/agent",
+    "sessionId": "test-session-123",
     "callbackConfig": {
-      "name": "OpenCode Task",
-      "agentId": "main",
-      "deliver": true,
-      "channel": "telegram"
+      "url": "http://localhost:18789/hooks/agent",
+      "apiKey": "your-token",
+      "agentId": "main"
     }
   }'
 ```
-
-### 4. Receive callback in OpenClaw
-
-OpenClaw will receive the task completion via its `/hooks/agent` endpoint and can forward it to your configured messaging channel (Telegram, Slack, Discord, etc.).
-
-## Testing Webhook Callback
-
-Test that OpenClaw can receive webhooks:
-
-```bash
-curl -X POST http://localhost:18789/hooks/agent \
-  -H "Authorization: Bearer your-openclaw-hooks-token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "Test message from OpenCode plugin",
-    "name": "Test Hook",
-    "deliver": true,
-    "channel": "last"
-  }'
-```
-
-## Comparison with claude-code-hooks
-
-| Feature | claude-code-hooks | @laceletho/plugin-openclaw |
-|---------|------------------|------------------------------|
-| Trigger | Stop/SessionEnd hooks | Webhook HTTP endpoint |
-| Integration | Shell scripts | TypeScript plugin |
-| Orchestration | Agent Teams | Session API |
-| Notification | Telegram + file | OpenClaw /hooks/agent |
-| Metadata | task-meta.json | In-memory + HTTP API |
-| Callback Format | Shell + CLI | HTTP POST to /hooks/agent |
-
-## Troubleshooting
-
-### "Unauthorized" errors
-
-Ensure the `openclawApiKey` in plugin config matches the `hooks.token` in OpenClaw config.
-
-### Callbacks not received
-
-1. Verify OpenClaw Gateway is running: `curl http://localhost:18789/health`
-2. Check hooks are enabled in OpenClaw config
-3. Ensure network connectivity between OpenCode and OpenClaw
-4. Check OpenClaw logs for incoming requests
-
-### Security Considerations
-
-- Keep `hooks.token` secret and use a strong random value
-- Run OpenClaw Gateway behind a firewall or Tailscale for remote access
-- Use `allowRequestSessionKey: false` to prevent session key injection
-- Restrict `allowedAgentIds` to only necessary agents
 
 ## Development
 
