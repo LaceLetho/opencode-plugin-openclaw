@@ -11,6 +11,8 @@ OpenCode plugin for session callback support with OpenClaw. Subscribes to OpenCo
 
 ## Architecture
 
+This plugin runs inside **OpenCode** and provides an HTTP server for callback registration:
+
 ```
 ┌─────────────────┐      POST /register     ┌─────────────────────┐
 │   CLI/Tool      │ ──────────────────────> │  OpenclawPlugin     │
@@ -24,7 +26,7 @@ OpenCode plugin for session callback support with OpenClaw. Subscribes to OpenCo
                                             ┌─────────────────────┐
                                             │  Subscribe to       │
                                             │  session.updated    │
-                                            │  session.deleted    │
+                                            │  message.part.*     │
                                             └──────────┬──────────┘
                                                        │
                                                        │ session completes
@@ -49,13 +51,11 @@ Add to your `opencode.json`:
 
 ```json
 {
-  "plugins": ["@laceletho/plugin-openclaw"]
+  "plugins": ["@laceletho/plugin-openclaw"],
 }
 ```
 
-### Plugin Settings
-
-This plugin uses **environment variables** for configuration (OpenCode does not support custom fields in `opencode.json`):
+### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -64,13 +64,15 @@ This plugin uses **environment variables** for configuration (OpenCode does not 
 
 ## How It Works
 
-1. **Registration**: When a CLI/tool creates an OpenCode session and wants a callback, it sends a POST request to the plugin's `/register` endpoint with the session ID and callback configuration.
+1. **Registration**: A CLI/tool creates an OpenCode session and sends a POST request to the plugin's `/register` endpoint with the session ID and callback configuration.
 
-2. **Event Subscription**: The plugin subscribes to OpenCode's `session.updated` and `session.deleted` events.
+2. **Event Subscription**: The plugin subscribes to OpenCode's `session.updated`, `message.part.*`, and `session.deleted` events.
 
-3. **Callback Trigger**: When a registered session's status changes to `completed` or `failed`, the plugin automatically sends a webhook to the configured OpenClaw endpoint.
+3. **Content Accumulation**: The plugin accumulates text content and tool outputs from `message.part.updated` and `message.part.delta` events.
 
-4. **Cleanup**: After sending the callback (or when a session is deleted), the plugin removes the registration from memory.
+4. **Callback Trigger**: When a registered session's status changes to `completed` or `failed`, the plugin sends a webhook to the configured OpenClaw endpoint with the accumulated content.
+
+5. **Cleanup**: After sending the callback (or when a session is deleted), the plugin removes the registration from memory.
 
 ## API Endpoints
 
@@ -116,41 +118,19 @@ Health check endpoint.
 
 The plugin subscribes to the following OpenCode events:
 
-### `message.part.updated`
-
-Triggered when a message part is created or updated. The plugin accumulates text content and tool outputs from these events to build the complete session result.
-
-### `message.part.delta`
-
-Triggered during streaming text generation. The plugin appends streaming deltas to the accumulated content.
-
-### `session.updated`
-
-Triggered when session metadata is updated. The plugin monitors the session status and sends the callback when the status becomes `completed` or `failed`.
-
-### `session.error`
-
-Triggered when a session encounters an error. The plugin marks the session as failed and includes error information in the callback.
-
-### `session.deleted`
-
-Triggered when a session is deleted. The plugin removes the session from the callback registry.
-
-### Important: Event Data Limitations
-
-**`session.updated` events do NOT contain message content**. They only include session metadata (id, status, timestamps, etc.). The actual content is delivered through separate `message.part.*` events.
-
-The plugin automatically handles this by:
-1. Listening to `message.part.updated` and `message.part.delta` events
-2. Accumulating text and tool outputs in memory
-3. Including the accumulated content when sending the callback on `session.updated`
+| Event | Purpose |
+|-------|---------|
+| `message.part.updated` | Accumulate text content and tool outputs |
+| `message.part.delta` | Append streaming text deltas |
+| `session.updated` | Monitor session status for completion |
+| `session.error` | Track session errors |
+| `session.deleted` | Clean up registry on session deletion |
 
 ## Callback to OpenClaw
 
 When a registered session completes, the plugin sends a POST request to the configured URL:
 
-### Payload Format
-
+**Payload:**
 ```json
 {
   "message": "Task completed: sess_abc123\n\nResult:\nHere's the code...",
@@ -170,36 +150,9 @@ Content-Type: application/json
 
 ## Usage with CLI
 
-This plugin is designed to work with `openclaw-opencode-cli`:
+This plugin is designed to work with `@laceletho/openclaw-opencode-cli`.
 
-```bash
-# 1. Start OpenCode with the plugin
-opencode serve
-
-# 2. From another terminal, dispatch a task with CLI
-export OPENCODE_URL=http://localhost:4096
-export OPENCODE_PASSWORD=your-password
-export OPENCLAW_CALLBACK_URL=http://localhost:18789/hooks/agent
-
-openclaw-opencode task "Write a Python function"
-
-# 3. Plugin automatically sends callback when session completes
-```
-
-## OpenClaw Configuration
-
-To receive webhook callbacks, OpenClaw must have its **hooks system enabled**. Add this to your OpenClaw configuration:
-
-```json
-{
-  "hooks": {
-    "enabled": true,
-    "token": "your-openclaw-hooks-token",
-    "path": "/hooks",
-    "allowedAgentIds": ["main", "hooks"]
-  }
-}
-```
+**See the [CLI documentation](https://github.com/LaceLetho/openclaw-opencode-cli) for usage instructions.**
 
 ## Testing
 
