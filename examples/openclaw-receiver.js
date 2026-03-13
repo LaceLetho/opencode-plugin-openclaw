@@ -2,7 +2,7 @@
  * OpenClaw Webhook Receiver Example
  * 
  * This example shows how to create a simple HTTP server that receives
- * webhook callbacks from the @opencode-ai/plugin-openclaw.
+ * webhook callbacks from the @laceletho/plugin-openclaw.
  * 
  * IMPORTANT: This is for demonstration purposes. In production, OpenClaw
  * has a built-in /hooks/agent endpoint that should be used instead.

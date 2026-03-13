@@ -1,4 +1,4 @@
-# @opencode-ai/plugin-openclaw
+# @laceletho/plugin-openclaw
 
 OpenCode plugin for asynchronous task execution with OpenClaw callback support.
 
@@ -41,7 +41,7 @@ OpenCode plugin for asynchronous task execution with OpenClaw callback support.
 ## Installation
 
 ```bash
-npm install @opencode-ai/plugin-openclaw
+npm install @laceletho/plugin-openclaw
 ```
 
 ## Configuration
@@ -52,7 +52,7 @@ Add to your `opencode.json`:
 
 ```json
 {
-  "plugins": ["@opencode-ai/plugin-openclaw"],
+  "plugins": ["@laceletho/plugin-openclaw"],
   "openclaw": {
     "port": 9090,
     "openclawWebhookUrl": "http://localhost:18789/hooks/agent",
@@ -272,7 +272,7 @@ curl -X POST http://localhost:18789/hooks/agent \
 
 ## Comparison with claude-code-hooks
 
-| Feature | claude-code-hooks | @opencode-ai/plugin-openclaw |
+| Feature | claude-code-hooks | @laceletho/plugin-openclaw |
 |---------|------------------|------------------------------|
 | Trigger | Stop/SessionEnd hooks | Webhook HTTP endpoint |
 | Integration | Shell scripts | TypeScript plugin |

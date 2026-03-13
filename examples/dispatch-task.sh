@@ -6,7 +6,7 @@
 # Results are sent back to OpenClaw via its /hooks/agent endpoint.
 #
 # Prerequisites:
-# 1. OpenCode server running with @opencode-ai/plugin-openclaw installed
+# 1. OpenCode server running with @laceletho/plugin-openclaw installed
 # 2. OpenClaw Gateway running with hooks enabled
 # 3. OPENCLAW_API_KEY environment variable set (matching OpenClaw hooks.token)
 
