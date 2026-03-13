@@ -49,7 +49,7 @@ Add to your `opencode.json`:
 
 ```json
 {
-  "plugins": ["@laceletho/plugin-openclaw"],
+  "plugin": ["@laceletho/plugin-openclaw"],
   "openclaw": {
     "port": 9090,
     "openclawApiKey": "your-openclaw-hooks-token"
