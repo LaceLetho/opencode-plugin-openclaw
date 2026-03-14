@@ -366,11 +366,14 @@ export default async function OpenclawPlugin({}: PluginInput) {
           hasError: false,
         })
 
+        const registeredConfig = sessionRegistry.get(sessionId)!.config
         logger.info("Callback registered successfully", {
           sessionId,
           callbackUrl: callbackConfig.url,
           agentId: callbackConfig.agentId || "main",
           hasSessionKey: !!callbackConfig.sessionKey,
+          hasApiKey: !!registeredConfig.apiKey,
+          apiKeySource: callbackConfig.apiKey ? "provided" : (pluginConfig.openclawApiKey ? "env" : "none"),
           totalRegistered: sessionRegistry.size,
         })
 
@@ -411,10 +414,23 @@ export default async function OpenclawPlugin({}: PluginInput) {
     })
   })
 
+  // Load default API key from environment variable if not already set
+  const envApiKey = process.env.OPENCLAW_API_KEY
+  if (envApiKey && !pluginConfig.openclawApiKey) {
+    pluginConfig.openclawApiKey = envApiKey
+    logger.info("Loaded openclawApiKey from environment variable", {
+      hasApiKey: true,
+    })
+  }
+
   return {
     config: async (cfg: { openclaw?: OpenclawConfig }) => {
       if (cfg.openclaw) {
         Object.assign(pluginConfig, cfg.openclaw)
+        // Allow environment variable to override config
+        if (envApiKey) {
+          pluginConfig.openclawApiKey = envApiKey
+        }
         logger.info("Configuration updated", {
           port: pluginConfig.port,
           hasApiKey: !!pluginConfig.openclawApiKey,
