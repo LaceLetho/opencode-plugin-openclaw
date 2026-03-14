@@ -275,149 +275,159 @@ export default async function OpenclawPlugin({}: PluginInput) {
       }
     },
 
-    "*": async (event: any, eventType: string) => {
-      // Catch-all handler for debugging
+    // Use 'event' hook to receive all events, then filter by type
+    event: async ({ event }: { event: any }) => {
+      const eventType = event?.type
+
+      if (!eventType) return
+
+      // Log all session and message events for debugging
       if (eventType.includes("session") || eventType.includes("message")) {
         logger.info(`Received event: ${eventType}`, {
-          eventKeys: Object.keys(event),
-          hasSessionID: !!event.sessionID,
-          hasProperties: !!event.properties,
+          sessionID: event.sessionID,
           propertiesKeys: event.properties ? Object.keys(event.properties) : null,
         })
       }
-    },
 
-    "message.part.updated": async (event: any) => {
-      const part = event.part
-      if (!part?.sessionID) return
+      switch (eventType) {
+        case "message.part.updated": {
+          const part = event.part
+          if (!part?.sessionID) return
 
-      const state = sessionRegistry.get(part.sessionID)
-      if (!state) return
+          const state = sessionRegistry.get(part.sessionID)
+          if (!state) return
 
-      logger.debug("Message part updated", {
-        sessionId: part.sessionID,
-        partType: part.type,
-        partId: part.id,
-      })
+          logger.debug("Message part updated", {
+            sessionId: part.sessionID,
+            partType: part.type,
+            partId: part.id,
+          })
 
-      switch (part.type) {
-        case "text": {
-          if (part.text) {
-            state.textParts.push(part.text)
-            logger.debug("Text part accumulated", {
-              sessionId: part.sessionID,
-              textLength: part.text.length,
-              totalParts: state.textParts.length,
-            })
-          }
-          break
-        }
-        case "tool": {
-          if (part.state) {
-            switch (part.state.status) {
-              case "completed":
-                state.toolOutputs.push({
-                  tool: part.tool,
-                  output: part.state.output || "(no output)",
-                })
-                logger.debug("Tool execution completed", {
+          switch (part.type) {
+            case "text": {
+              if (part.text) {
+                state.textParts.push(part.text)
+                logger.debug("Text part accumulated", {
                   sessionId: part.sessionID,
-                  tool: part.tool,
-                  totalTools: state.toolOutputs.length,
+                  textLength: part.text.length,
+                  totalParts: state.textParts.length,
                 })
-                break
-              case "error":
-                state.hasError = true
-                state.toolOutputs.push({
-                  tool: part.tool,
-                  output: "",
-                  error: part.state.error || "Unknown error",
-                })
-                logger.warn("Tool execution failed", {
-                  sessionId: part.sessionID,
-                  tool: part.tool,
-                  error: part.state.error,
-                })
-                break
+              }
+              break
+            }
+            case "tool": {
+              if (part.state) {
+                switch (part.state.status) {
+                  case "completed":
+                    state.toolOutputs.push({
+                      tool: part.tool,
+                      output: part.state.output || "(no output)",
+                    })
+                    logger.debug("Tool execution completed", {
+                      sessionId: part.sessionID,
+                      tool: part.tool,
+                      totalTools: state.toolOutputs.length,
+                    })
+                    break
+                  case "error":
+                    state.hasError = true
+                    state.toolOutputs.push({
+                      tool: part.tool,
+                      output: "",
+                      error: part.state.error || "Unknown error",
+                    })
+                    logger.warn("Tool execution failed", {
+                      sessionId: part.sessionID,
+                      tool: part.tool,
+                      error: part.state.error,
+                    })
+                    break
+                }
+              }
+              break
+            }
+            case "reasoning": {
+              logger.debug("Reasoning part received", { sessionId: part.sessionID })
+              break
             }
           }
           break
         }
-        case "reasoning": {
-          logger.debug("Reasoning part received", { sessionId: part.sessionID })
+
+        case "message.part.delta": {
+          const { sessionID, field, delta } = event
+          if (!sessionID || field !== "text" || !delta) return
+
+          const state = sessionRegistry.get(sessionID)
+          if (!state) return
+
+          if (state.textParts.length > 0) {
+            state.textParts[state.textParts.length - 1] += delta
+          } else {
+            state.textParts.push(delta)
+          }
+
+          logger.debug("Text delta received", {
+            sessionId: sessionID,
+            deltaLength: delta.length,
+            totalLength: state.textParts.join("").length,
+          })
           break
         }
-      }
-    },
 
-    "message.part.delta": async (event: any) => {
-      const { sessionID, field, delta } = event
-      if (!sessionID || field !== "text" || !delta) return
+        case "session.idle": {
+          logger.info("Received session.idle event", { event: JSON.stringify(event) })
 
-      const state = sessionRegistry.get(sessionID)
-      if (!state) return
+          const sessionID = event.sessionID || event.properties?.sessionID
+          if (!sessionID) {
+            logger.warn("No sessionID in session.idle event", { event })
+            return
+          }
 
-      if (state.textParts.length > 0) {
-        state.textParts[state.textParts.length - 1] += delta
-      } else {
-        state.textParts.push(delta)
-      }
+          const state = sessionRegistry.get(sessionID)
+          if (!state) {
+            logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
+            return
+          }
 
-      logger.debug("Text delta received", {
-        sessionId: sessionID,
-        deltaLength: delta.length,
-        totalLength: state.textParts.join("").length,
-      })
-    },
+          logger.info("Session idle, triggering callback", {
+            sessionId: sessionID,
+            hasText: state.textParts.length > 0,
+            hasTools: state.toolOutputs.length > 0,
+          })
 
-    "session.idle": async (event: any) => {
-      logger.info("Received session.idle event", { event: JSON.stringify(event) })
+          await handleSessionComplete(sessionID, state)
+          break
+        }
 
-      const sessionID = event.sessionID || event.properties?.sessionID
-      if (!sessionID) {
-        logger.warn("No sessionID in session.idle event", { event })
-        return
-      }
+        case "session.error": {
+          const { sessionID, error } = event
+          if (!sessionID) return
 
-      const state = sessionRegistry.get(sessionID)
-      if (!state) {
-        logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
-        return
-      }
+          const state = sessionRegistry.get(sessionID)
+          if (!state) return
 
-      logger.info("Session idle, triggering callback", {
-        sessionId: sessionID,
-        hasText: state.textParts.length > 0,
-        hasTools: state.toolOutputs.length > 0,
-      })
+          state.hasError = true
+          state.errorMessage = error?.message || String(error)
 
-      await handleSessionComplete(sessionID, state)
-    },
+          logger.error("Session error received", {
+            sessionId: sessionID,
+            error: state.errorMessage,
+          })
+          break
+        }
 
-    "session.error": async (event: any) => {
-      const { sessionID, error } = event
-      if (!sessionID) return
-
-      const state = sessionRegistry.get(sessionID)
-      if (!state) return
-
-      state.hasError = true
-      state.errorMessage = error?.message || String(error)
-
-      logger.error("Session error received", {
-        sessionId: sessionID,
-        error: state.errorMessage,
-      })
-    },
-
-    "session.deleted": async (event: any) => {
-      const sessionId = event.info?.id || event.sessionId
-      if (sessionId && sessionRegistry.has(sessionId)) {
-        logger.info("Session deleted, removing callback registration", {
-          sessionId,
-          wasTracked: true,
-        })
-        sessionRegistry.delete(sessionId)
+        case "session.deleted": {
+          const sessionId = event.info?.id || event.sessionId
+          if (sessionId && sessionRegistry.has(sessionId)) {
+            logger.info("Session deleted, removing callback registration", {
+              sessionId,
+              wasTracked: true,
+            })
+            sessionRegistry.delete(sessionId)
+          }
+          break
+        }
       }
     },
 
