@@ -444,17 +444,20 @@ export default async function OpenclawPlugin({}: PluginInput) {
 
       if (!eventType) return
 
+      // Extract properties from the event (OpenCode SDK event structure)
+      const props = event.properties || {}
+
       // Log all session and message events for debugging
       if (eventType.includes("session") || eventType.includes("message")) {
         logger.info(`Received event: ${eventType}`, {
-          sessionID: event.sessionID,
-          propertiesKeys: event.properties ? Object.keys(event.properties) : null,
+          sessionID: props.sessionID,
+          propertiesKeys: Object.keys(props),
         })
       }
 
       switch (eventType) {
         case "message.part.updated": {
-          const part = event.part
+          const part = props.part
           if (!part?.sessionID) return
 
           const state = sessionRegistry.get(part.sessionID)
@@ -518,7 +521,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
         }
 
         case "message.part.delta": {
-          const { sessionID, field, delta } = event
+          const { sessionID, field, delta } = props
           if (!sessionID || field !== "text" || !delta) return
 
           const state = sessionRegistry.get(sessionID)
@@ -541,9 +544,9 @@ export default async function OpenclawPlugin({}: PluginInput) {
         case "session.idle": {
           logger.info("Received session.idle event", { event: JSON.stringify(event) })
 
-          const sessionID = event.sessionID || event.properties?.sessionID
+          const sessionID = props.sessionID
           if (!sessionID) {
-            logger.warn("No sessionID in session.idle event", { event })
+            logger.warn("No sessionID in session.idle event", { event, props })
             return
           }
 
@@ -564,7 +567,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
         }
 
         case "session.error": {
-          const { sessionID, error } = event
+          const { sessionID, error } = props
           if (!sessionID) return
 
           const state = sessionRegistry.get(sessionID)
@@ -581,7 +584,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
         }
 
         case "session.deleted": {
-          const sessionId = event.info?.id || event.sessionId
+          const sessionId = props.sessionID || props.info?.id
           if (sessionId && sessionRegistry.has(sessionId)) {
             logger.info("Session deleted, removing callback registration", {
               sessionId,
