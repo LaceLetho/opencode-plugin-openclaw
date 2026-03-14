@@ -131,9 +131,10 @@ const sendCallback = async (sessionId: string, state: SessionState): Promise<voi
     channel: state.config.channel || "last",
   }
 
-  // Include sessionKey if available for proper reply routing
+  // Include session if available for proper reply routing
+  // Note: openclaw expects 'session' field, not 'sessionKey'
   if (state.config.sessionKey) {
-    payload.sessionKey = state.config.sessionKey
+    payload.session = state.config.sessionKey
   }
 
   logger.info("Sending callback to OpenClaw", {
