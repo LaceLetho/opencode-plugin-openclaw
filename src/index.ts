@@ -275,6 +275,18 @@ export default async function OpenclawPlugin({}: PluginInput) {
       }
     },
 
+    "*": async (event: any, eventType: string) => {
+      // Catch-all handler for debugging
+      if (eventType.includes("session") || eventType.includes("message")) {
+        logger.info(`Received event: ${eventType}`, {
+          eventKeys: Object.keys(event),
+          hasSessionID: !!event.sessionID,
+          hasProperties: !!event.properties,
+          propertiesKeys: event.properties ? Object.keys(event.properties) : null,
+        })
+      }
+    },
+
     "message.part.updated": async (event: any) => {
       const part = event.part
       if (!part?.sessionID) return
