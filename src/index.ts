@@ -13,6 +13,7 @@ interface CallbackConfig {
   agentId?: string
   channel?: string
   deliver?: boolean
+  sessionKey?: string  // OpenClaw session key for routing replies
 }
 
 interface SessionState {
@@ -103,7 +104,7 @@ const formatCallbackMessage = (sessionId: string, state: SessionState): string =
 }
 
 const sendCallback = async (sessionId: string, state: SessionState): Promise<void> => {
-  const payload = {
+  const payload: Record<string, any> = {
     message: formatCallbackMessage(sessionId, state),
     name: "OpenCode Task",
     agentId: state.config.agentId || "main",
@@ -112,10 +113,16 @@ const sendCallback = async (sessionId: string, state: SessionState): Promise<voi
     channel: state.config.channel || "last",
   }
 
+  // Include sessionKey if available for proper reply routing
+  if (state.config.sessionKey) {
+    payload.sessionKey = state.config.sessionKey
+  }
+
   logger.info("Sending callback to OpenClaw", {
     sessionId,
     callbackUrl: state.config.url,
     agentId: payload.agentId,
+    hasSessionKey: !!state.config.sessionKey,
     hasError: state.hasError,
     textParts: state.textParts.length,
     toolOutputs: state.toolOutputs.length,
@@ -204,6 +211,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
           sessionId,
           callbackUrl: callbackConfig?.url,
           agentId: callbackConfig?.agentId,
+          hasSessionKey: !!callbackConfig?.sessionKey,
         })
 
         if (!sessionId || !callbackConfig?.url) {
@@ -220,6 +228,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
             agentId: callbackConfig.agentId || "main",
             channel: callbackConfig.channel || "last",
             deliver: callbackConfig.deliver ?? true,
+            sessionKey: callbackConfig.sessionKey,  // Store sessionKey for reply routing
           },
           textParts: [],
           toolOutputs: [],
@@ -230,6 +239,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
           sessionId,
           callbackUrl: callbackConfig.url,
           agentId: callbackConfig.agentId || "main",
+          hasSessionKey: !!callbackConfig.sessionKey,
           totalRegistered: sessionRegistry.size,
         })
 
