@@ -25,6 +25,24 @@ interface SessionState {
   errorMessage?: string
 }
 
+// Global singleton to track server instance across plugin reloads
+declare global {
+  var __openclawPluginServer: {
+    server: ReturnType<typeof createServer> | null
+    isRunning: boolean
+    startTime: number
+  }
+}
+
+// Initialize global singleton
+if (!globalThis.__openclawPluginServer) {
+  globalThis.__openclawPluginServer = {
+    server: null,
+    isRunning: false,
+    startTime: 0,
+  }
+}
+
 const sessionRegistry = new Map<string, SessionState>()
 
 let pluginConfig: OpenclawConfig = {
@@ -176,8 +194,121 @@ const handleSessionComplete = async (sessionId: string, state: SessionState) => 
   logger.info("Session removed from registry", { sessionId, remainingSessions: sessionRegistry.size })
 }
 
+/**
+ * Check if a port is already in use by attempting to connect
+ */
+const isPortInUse = (port: number): Promise<boolean> => {
+  return new Promise((resolve) => {
+    const net = require("net")
+    const client = net.createConnection({ port, host: "127.0.0.1", timeout: 500 })
+
+    client.on("connect", () => {
+      client.destroy()
+      resolve(true)
+    })
+
+    client.on("error", () => {
+      resolve(false)
+    })
+
+    client.on("timeout", () => {
+      client.destroy()
+      resolve(false)
+    })
+  })
+}
+
+/**
+ * Health check the existing server
+ */
+const checkExistingServer = async (port: number): Promise<boolean> => {
+  try {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 1000)
+
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: controller.signal,
+    })
+
+    clearTimeout(timeout)
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 export default async function OpenclawPlugin({}: PluginInput) {
   logger.info("Initializing OpenClaw plugin", { port: pluginConfig.port })
+
+  // Check if server is already running (from previous plugin instance)
+  const singleton = globalThis.__openclawPluginServer
+
+  if (singleton.isRunning && singleton.server) {
+    // Verify the server is still responding
+    const isHealthy = await checkExistingServer(pluginConfig.port)
+
+    if (isHealthy) {
+      logger.info("Reusing existing OpenClaw plugin server", {
+        port: pluginConfig.port,
+        startTime: new Date(singleton.startTime).toISOString(),
+      })
+
+      // Return a minimal plugin interface that reuses the existing server
+      return {
+        config: async (cfg: { openclaw?: OpenclawConfig }) => {
+          if (cfg.openclaw) {
+            Object.assign(pluginConfig, cfg.openclaw)
+            logger.info("Configuration updated (server reused)", {
+              port: pluginConfig.port,
+              hasApiKey: !!pluginConfig.openclawApiKey,
+            })
+          }
+        },
+
+        event: async ({ event }: { event: any }) => {
+          // Event handling is still active from the original instance
+          // But we need to handle events in this instance too for sessionRegistry
+          const eventType = event?.type
+          if (!eventType) return
+
+          switch (eventType) {
+            case "message.part.updated":
+            case "message.part.delta":
+            case "session.idle":
+            case "session.error":
+            case "session.deleted": {
+              // These events are handled by the original instance
+              // But we log them for visibility
+              logger.debug(`Event received by secondary instance: ${eventType}`, {
+                sessionID: event.sessionID,
+              })
+              break
+            }
+          }
+        },
+
+        dispose: async () => {
+          // Don't close the server - it's shared
+          logger.info("Plugin instance disposed (server still running)")
+        },
+      }
+    } else {
+      logger.warn("Existing server not responding, will start new one", {
+        port: pluginConfig.port,
+      })
+      singleton.isRunning = false
+      singleton.server = null
+    }
+  }
+
+  // Check if another process is using the port
+  const portBusy = await isPortInUse(pluginConfig.port)
+  if (portBusy) {
+    logger.error("Port is already in use by another process", {
+      port: pluginConfig.port,
+    })
+    throw new Error(`Port ${pluginConfig.port} is already in use`)
+  }
 
   const server = createServer(async (req, res) => {
     const url = req.url || "/"
@@ -262,9 +393,15 @@ export default async function OpenclawPlugin({}: PluginInput) {
 
   await new Promise<void>((resolve, reject) => {
     server.listen(pluginConfig.port, () => {
+      // Update global singleton
+      singleton.server = server
+      singleton.isRunning = true
+      singleton.startTime = Date.now()
+
       logger.info("Plugin HTTP server started", {
         port: pluginConfig.port,
         logLevel: process.env.LOG_LEVEL || "info",
+        singleton: true,
       })
       resolve()
     })
@@ -443,7 +580,20 @@ export default async function OpenclawPlugin({}: PluginInput) {
 
     dispose: async () => {
       logger.info("Plugin disposing", { registeredSessions: sessionRegistry.size })
-      server.close()
+
+      // Only close the server if we're the primary instance
+      if (singleton.server === server) {
+        singleton.isRunning = false
+        singleton.server = null
+        server.close((err) => {
+          if (err) {
+            logger.error("Error closing server", { error: err.message })
+          } else {
+            logger.info("Server closed successfully")
+          }
+        })
+      }
+
       sessionRegistry.clear()
       logger.info("Plugin disposed")
     },
