@@ -13,6 +13,7 @@ interface CallbackConfig {
   channel?: string
   deliver?: boolean
   to?: string  // Target recipient for message forwarding
+  prompt?: string  // Original user prompt from CLI
 }
 
 interface SessionState {
@@ -110,9 +111,11 @@ const formatCallbackMessage = (sessionId: string, state: SessionState): string =
   }
 
   // Display user request if available
-  if (state.userPrompt) {
+  // Try userPrompt first (from event extraction), fallback to config.prompt (from registration)
+  const userPrompt = state.userPrompt || state.config.prompt
+  if (userPrompt) {
     lines.push("\nYour Request:")
-    lines.push(state.userPrompt)
+    lines.push(userPrompt)
   }
 
   // Display OpenCode response
