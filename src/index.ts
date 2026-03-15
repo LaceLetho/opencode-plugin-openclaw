@@ -248,7 +248,7 @@ const checkExistingServer = async (port: number): Promise<boolean> => {
   }
 }
 
-export default async function OpenclawPlugin({}: PluginInput) {
+export default async function OpenclawPlugin({ }: PluginInput) {
   logger.info("Initializing OpenClaw plugin", { port: pluginConfig.port })
 
   // Check if server is already running (from previous plugin instance)
@@ -464,7 +464,9 @@ export default async function OpenclawPlugin({}: PluginInput) {
       }
 
       switch (eventType) {
-        case "message.created": {
+        case "message.created":
+        case "message.updated": {
+          logger.warn("TRACK_MESSAGE", { eventType, hasProps: !!props, hasInfo: !!props.info })
           const { info } = props
           if (!info?.sessionID || !info?.id) return
 
