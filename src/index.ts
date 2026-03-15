@@ -3,7 +3,6 @@ import type { PluginInput } from "@opencode-ai/plugin"
 
 export interface OpenclawConfig {
   port?: number
-  openclawWebhookUrl?: string
   openclawApiKey?: string
 }
 
@@ -47,7 +46,6 @@ const sessionRegistry = new Map<string, SessionState>()
 
 let pluginConfig: OpenclawConfig = {
   port: 9090,
-  openclawWebhookUrl: "",
   openclawApiKey: "",
 }
 
@@ -420,7 +418,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
 
   // Load default API key from environment variable if not already set
   const envApiKey = process.env.OPENCLAW_API_KEY
-  if (envApiKey && !pluginConfig.openclawApiKey) {
+  if (envApiKey) {
     pluginConfig.openclawApiKey = envApiKey
     logger.info("Loaded openclawApiKey from environment variable", {
       hasApiKey: true,
@@ -428,18 +426,11 @@ export default async function OpenclawPlugin({}: PluginInput) {
   }
 
   return {
-    config: async (cfg: { openclaw?: OpenclawConfig }) => {
-      if (cfg.openclaw) {
-        Object.assign(pluginConfig, cfg.openclaw)
-        // Allow environment variable to override config
-        if (envApiKey) {
-          pluginConfig.openclawApiKey = envApiKey
-        }
-        logger.info("Configuration updated", {
-          port: pluginConfig.port,
-          hasApiKey: !!pluginConfig.openclawApiKey,
-        })
-      }
+    // Plugin configuration is now only via environment variables
+    // No opencode.json configuration to avoid compatibility issues
+    config: async () => {
+      // Configuration is loaded from environment variables only
+      logger.debug("Plugin config called (no opencode.json config needed)")
     },
 
     // Use 'event' hook to receive all events, then filter by type

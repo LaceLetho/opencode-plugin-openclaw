@@ -1,8 +1,9 @@
 import type { PluginInput, Hooks } from "@opencode-ai/plugin"
 
+// Plugin configuration is now loaded from environment variables only
+// to avoid compatibility issues with opencode.json
 export interface OpenclawConfig {
   port?: number
-  openclawWebhookUrl?: string
   openclawApiKey?: string
 }
 
@@ -15,10 +16,7 @@ export interface CallbackConfig {
   to?: string  // Target recipient for message forwarding
 }
 
-declare module "@opencode-ai/plugin" {
-  interface Config {
-    openclaw?: OpenclawConfig
-  }
-}
+// Removed: Config module extension for opencode.json
+// Plugin now only uses environment variables for configuration
 
 export type { PluginInput, Hooks }
