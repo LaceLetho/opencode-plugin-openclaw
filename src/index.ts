@@ -23,7 +23,9 @@ interface SessionState {
   hasError: boolean
   errorMessage?: string
   partTypes: Map<string, string> // Track partID -> partType to filter out reasoning content
+  messageRoles: Map<string, string> // Track messageID -> role (user/assistant)
   userPrompt?: string // Store user's original question
+  userMessageId?: string // Track the first user message ID
 }
 
 // Global singleton to track server instance across plugin reloads
@@ -375,6 +377,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
           toolOutputs: [],
           hasError: false,
           partTypes: new Map(),
+          messageRoles: new Map(),
         })
 
         const registeredConfig = sessionRegistry.get(sessionId)!.config
@@ -468,18 +471,16 @@ export default async function OpenclawPlugin({}: PluginInput) {
           const state = sessionRegistry.get(info.sessionID)
           if (!state) return
 
-          // Store user's first message (user prompt)
-          if (info.role === "user" && !state.userPrompt) {
-            // Try to get text from parts if available
-            const parts = props.parts || []
-            const textParts = parts.filter((p: any) => p.type === "text")
-            if (textParts.length > 0) {
-              state.userPrompt = textParts.map((p: any) => p.text).join("")
-              logger.debug("User prompt captured", {
-                sessionId: info.sessionID,
-                promptLength: state.userPrompt.length,
-              })
-            }
+          // Track message role for later use
+          state.messageRoles.set(info.id, info.role)
+
+          // Track the first user message ID
+          if (info.role === "user" && !state.userMessageId) {
+            state.userMessageId = info.id
+            logger.debug("User message tracked", {
+              sessionId: info.sessionID,
+              messageId: info.id,
+            })
           }
           break
         }
@@ -503,12 +504,28 @@ export default async function OpenclawPlugin({}: PluginInput) {
           switch (part.type) {
             case "text": {
               if (part.text) {
-                state.textParts.push(part.text)
-                logger.debug("Text part accumulated", {
-                  sessionId: part.sessionID,
-                  textLength: part.text.length,
-                  totalParts: state.textParts.length,
-                })
+                // Check if this is the user message or assistant message
+                const messageRole = state.messageRoles.get(part.messageID)
+                if (messageRole === "user" || part.messageID === state.userMessageId) {
+                  // This is user's question
+                  if (!state.userPrompt) {
+                    state.userPrompt = ""
+                  }
+                  state.userPrompt += part.text
+                  logger.debug("User prompt text accumulated", {
+                    sessionId: part.sessionID,
+                    textLength: part.text.length,
+                    totalLength: state.userPrompt.length,
+                  })
+                } else {
+                  // This is assistant's response
+                  state.textParts.push(part.text)
+                  logger.debug("Text part accumulated", {
+                    sessionId: part.sessionID,
+                    textLength: part.text.length,
+                    totalParts: state.textParts.length,
+                  })
+                }
               }
               break
             }
@@ -552,8 +569,8 @@ export default async function OpenclawPlugin({}: PluginInput) {
         }
 
         case "message.part.delta": {
-          const { sessionID, partID, field, delta } = props
-          if (!sessionID || field !== "text" || !delta || !partID) return
+          const { sessionID, messageID, partID, field, delta } = props
+          if (!sessionID || field !== "text" || !delta || !partID || !messageID) return
 
           const state = sessionRegistry.get(sessionID)
           if (!state) return
@@ -569,17 +586,32 @@ export default async function OpenclawPlugin({}: PluginInput) {
             return
           }
 
-          if (state.textParts.length > 0) {
-            state.textParts[state.textParts.length - 1] += delta
+          // Check if this is the user message or assistant message
+          const messageRole = state.messageRoles.get(messageID)
+          if (messageRole === "user" || messageID === state.userMessageId) {
+            // This is user's question delta
+            if (!state.userPrompt) {
+              state.userPrompt = ""
+            }
+            state.userPrompt += delta
+            logger.debug("User prompt delta received", {
+              sessionId: sessionID,
+              deltaLength: delta.length,
+              totalLength: state.userPrompt.length,
+            })
           } else {
-            state.textParts.push(delta)
+            // This is assistant's response delta
+            if (state.textParts.length > 0) {
+              state.textParts[state.textParts.length - 1] += delta
+            } else {
+              state.textParts.push(delta)
+            }
+            logger.debug("Text delta received", {
+              sessionId: sessionID,
+              deltaLength: delta.length,
+              totalLength: state.textParts.join("").length,
+            })
           }
-
-          logger.debug("Text delta received", {
-            sessionId: sessionID,
-            deltaLength: delta.length,
-            totalLength: state.textParts.join("").length,
-          })
           break
         }
 
