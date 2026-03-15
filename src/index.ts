@@ -27,6 +27,7 @@ interface SessionState {
   messageRoles: Map<string, string> // Track messageID -> role (user/assistant)
   userPrompt?: string // Store user's original question
   userMessageId?: string // Track the first user message ID
+  processedPartIDs: Set<string> // Track already processed partIDs to avoid duplicates
 }
 
 // Global singleton to track server instance across plugin reloads
@@ -121,7 +122,16 @@ const formatCallbackMessage = (sessionId: string, state: SessionState): string =
   // Display OpenCode response
   if (state.textParts.length > 0) {
     lines.push("\nOpencode Response:")
-    lines.push(state.textParts.join(""))
+    const combinedText = state.textParts.join("")
+    logger.warn("[DEBUG] Formatting callback message", {
+      sessionId,
+      textPartsCount: state.textParts.length,
+      textPartsLengths: state.textParts.map(p => p.length),
+      textPartsPreviews: state.textParts.map(p => p.substring(0, 100)),
+      combinedLength: combinedText.length,
+      combinedPreview: combinedText.substring(0, 200),
+    })
+    lines.push(combinedText)
   }
 
   if (state.toolOutputs.length > 0) {
@@ -381,6 +391,7 @@ export default async function OpenclawPlugin({ }: PluginInput) {
           hasError: false,
           partTypes: new Map(),
           messageRoles: new Map(),
+          processedPartIDs: new Set(),
         })
 
         const registeredConfig = sessionRegistry.get(sessionId)!.config
@@ -524,15 +535,32 @@ export default async function OpenclawPlugin({ }: PluginInput) {
                   })
                 } else {
                   // This is assistant's response
+                  // Check if this part was already processed (via delta events)
+                  if (state.processedPartIDs.has(part.id)) {
+                    logger.warn("[DEBUG] SKIPPING message.part.updated - part already processed via delta", {
+                      sessionId: part.sessionID,
+                      partId: part.id,
+                      textLength: part.text.length,
+                      processedCount: state.processedPartIDs.size,
+                    })
+                    break
+                  }
+
+                  // Mark this part as processed
+                  state.processedPartIDs.add(part.id)
+
                   logger.warn("[DEBUG] Adding text via message.part.updated", {
                     sessionId: part.sessionID,
                     messageId: part.messageID,
                     partId: part.id,
                     textLength: part.text.length,
-                    textPreview: part.text.substring(0, 50),
+                    textPreview: part.text.substring(0, 100),
                     currentTextPartsCount: state.textParts.length,
+                    processedCount: state.processedPartIDs.size,
                   })
+
                   state.textParts.push(part.text)
+
                   logger.debug("Text part accumulated", {
                     sessionId: part.sessionID,
                     textLength: part.text.length,
@@ -614,25 +642,41 @@ export default async function OpenclawPlugin({ }: PluginInput) {
             })
           } else {
             // This is assistant's response delta
+            const lastPart = state.textParts.length > 0 ? state.textParts[state.textParts.length - 1] : null
+            const isFirstDeltaForPart = !state.processedPartIDs.has(partID)
+
             logger.warn("[DEBUG] Adding text via message.part.delta", {
               sessionId: sessionID,
               messageId: messageID,
               partId: partID,
               deltaLength: delta.length,
-              deltaPreview: delta.substring(0, 50),
+              deltaPreview: delta.substring(0, 100),
               currentTextPartsCount: state.textParts.length,
               isAppending: state.textParts.length > 0,
+              isFirstDeltaForPart,
+              lastPartLength: lastPart ? lastPart.length : 0,
+              lastPartPreview: lastPart ? lastPart.substring(0, 100) : null,
+              textPartsArray: state.textParts,
             })
+
+            // Mark this part as being processed via delta
+            state.processedPartIDs.add(partID)
+
             if (state.textParts.length > 0) {
               state.textParts[state.textParts.length - 1] += delta
+              logger.warn("[DEBUG] Appended delta to existing text part", {
+                sessionId: sessionID,
+                partId: partID,
+                newLength: state.textParts[state.textParts.length - 1].length,
+                newPreview: state.textParts[state.textParts.length - 1].substring(0, 100),
+              })
             } else {
               state.textParts.push(delta)
+              logger.warn("[DEBUG] Pushed new text part from delta (was empty)", {
+                sessionId: sessionID,
+                partId: partID,
+              })
             }
-            logger.debug("Text delta received", {
-              sessionId: sessionID,
-              deltaLength: delta.length,
-              totalLength: state.textParts.join("").length,
-            })
           }
           break
         }
