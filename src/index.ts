@@ -524,6 +524,14 @@ export default async function OpenclawPlugin({ }: PluginInput) {
                   })
                 } else {
                   // This is assistant's response
+                  logger.warn("[DEBUG] Adding text via message.part.updated", {
+                    sessionId: part.sessionID,
+                    messageId: part.messageID,
+                    partId: part.id,
+                    textLength: part.text.length,
+                    textPreview: part.text.substring(0, 50),
+                    currentTextPartsCount: state.textParts.length,
+                  })
                   state.textParts.push(part.text)
                   logger.debug("Text part accumulated", {
                     sessionId: part.sessionID,
@@ -606,6 +614,15 @@ export default async function OpenclawPlugin({ }: PluginInput) {
             })
           } else {
             // This is assistant's response delta
+            logger.warn("[DEBUG] Adding text via message.part.delta", {
+              sessionId: sessionID,
+              messageId: messageID,
+              partId: partID,
+              deltaLength: delta.length,
+              deltaPreview: delta.substring(0, 50),
+              currentTextPartsCount: state.textParts.length,
+              isAppending: state.textParts.length > 0,
+            })
             if (state.textParts.length > 0) {
               state.textParts[state.textParts.length - 1] += delta
             } else {
