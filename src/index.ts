@@ -13,7 +13,7 @@ interface CallbackConfig {
   agentId?: string
   channel?: string
   deliver?: boolean
-  sessionKey?: string  // OpenClaw session key for routing replies
+  to?: string  // Target recipient for message forwarding
 }
 
 interface SessionState {
@@ -92,6 +92,12 @@ const readBody = (req: any): Promise<string> => {
 const formatCallbackMessage = (sessionId: string, state: SessionState): string => {
   const lines: string[] = []
 
+  // Add forwarding prefix if channel and to are specified
+  if (state.config.channel && state.config.to) {
+    lines.push(`Forward message below to ${state.config.channel} ${state.config.to}:`)
+    lines.push("")  // Empty line for separation
+  }
+
   if (state.hasError) {
     lines.push(`Task failed: ${sessionId}`)
     if (state.errorMessage) {
@@ -131,17 +137,12 @@ const sendCallback = async (sessionId: string, state: SessionState): Promise<voi
     channel: state.config.channel || "last",
   }
 
-  // Include session if available for proper reply routing
-  // Note: openclaw expects 'session' field, not 'sessionKey'
-  if (state.config.sessionKey) {
-    payload.session = state.config.sessionKey
-  }
-
   logger.info("Sending callback to OpenClaw", {
     sessionId,
     callbackUrl: state.config.url,
     agentId: payload.agentId,
-    hasSessionKey: !!state.config.sessionKey,
+    channel: state.config.channel,
+    to: state.config.to,
     hasError: state.hasError,
     textParts: state.textParts.length,
     toolOutputs: state.toolOutputs.length,
@@ -343,7 +344,8 @@ export default async function OpenclawPlugin({}: PluginInput) {
           sessionId,
           callbackUrl: callbackConfig?.url,
           agentId: callbackConfig?.agentId,
-          hasSessionKey: !!callbackConfig?.sessionKey,
+          channel: callbackConfig?.channel,
+          to: callbackConfig?.to,
         })
 
         if (!sessionId || !callbackConfig?.url) {
@@ -358,9 +360,9 @@ export default async function OpenclawPlugin({}: PluginInput) {
             url: callbackConfig.url,
             apiKey: callbackConfig.apiKey || pluginConfig.openclawApiKey,
             agentId: callbackConfig.agentId || "main",
-            channel: callbackConfig.channel || "last",
+            channel: callbackConfig.channel || "telegram",
             deliver: callbackConfig.deliver ?? true,
-            sessionKey: callbackConfig.sessionKey,  // Store sessionKey for reply routing
+            to: callbackConfig.to,
           },
           textParts: [],
           toolOutputs: [],
@@ -372,7 +374,8 @@ export default async function OpenclawPlugin({}: PluginInput) {
           sessionId,
           callbackUrl: callbackConfig.url,
           agentId: callbackConfig.agentId || "main",
-          hasSessionKey: !!callbackConfig.sessionKey,
+          channel: callbackConfig.channel,
+          to: callbackConfig.to,
           hasApiKey: !!registeredConfig.apiKey,
           apiKeySource: callbackConfig.apiKey ? "provided" : (pluginConfig.openclawApiKey ? "env" : "none"),
           totalRegistered: sessionRegistry.size,

@@ -12,6 +12,7 @@ export interface CallbackConfig {
   agentId?: string
   channel?: string
   deliver?: boolean
+  to?: string  // Target recipient for message forwarding
 }
 
 declare module "@opencode-ai/plugin" {
