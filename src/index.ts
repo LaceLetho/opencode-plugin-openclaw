@@ -22,6 +22,7 @@ interface SessionState {
   toolOutputs: Array<{ tool: string; output: string; error?: string }>
   hasError: boolean
   errorMessage?: string
+  partTypes: Map<string, string> // Track partID -> partType to filter out reasoning content
 }
 
 // Global singleton to track server instance across plugin reloads
@@ -365,6 +366,7 @@ export default async function OpenclawPlugin({}: PluginInput) {
           textParts: [],
           toolOutputs: [],
           hasError: false,
+          partTypes: new Map(),
         })
 
         const registeredConfig = sessionRegistry.get(sessionId)!.config
@@ -458,6 +460,9 @@ export default async function OpenclawPlugin({}: PluginInput) {
           const state = sessionRegistry.get(part.sessionID)
           if (!state) return
 
+          // Store part type to filter reasoning content from deltas
+          state.partTypes.set(part.id, part.type)
+
           logger.debug("Message part updated", {
             sessionId: part.sessionID,
             partType: part.type,
@@ -516,11 +521,22 @@ export default async function OpenclawPlugin({}: PluginInput) {
         }
 
         case "message.part.delta": {
-          const { sessionID, field, delta } = props
-          if (!sessionID || field !== "text" || !delta) return
+          const { sessionID, partID, field, delta } = props
+          if (!sessionID || field !== "text" || !delta || !partID) return
 
           const state = sessionRegistry.get(sessionID)
           if (!state) return
+
+          // Only accumulate text from text parts, not reasoning parts
+          const partType = state.partTypes.get(partID)
+          if (partType !== "text") {
+            logger.debug("Skipping delta for non-text part", {
+              sessionId: sessionID,
+              partId: partID,
+              partType: partType || "unknown",
+            })
+            return
+          }
 
           if (state.textParts.length > 0) {
             state.textParts[state.textParts.length - 1] += delta
