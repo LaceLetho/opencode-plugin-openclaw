@@ -23,6 +23,7 @@ interface SessionState {
   hasError: boolean
   errorMessage?: string
   partTypes: Map<string, string> // Track partID -> partType to filter out reasoning content
+  userPrompt?: string // Store user's original question
 }
 
 // Global singleton to track server instance across plugin reloads
@@ -106,8 +107,15 @@ const formatCallbackMessage = (sessionId: string, state: SessionState): string =
     lines.push(`Task completed: ${sessionId}`)
   }
 
+  // Display user request if available
+  if (state.userPrompt) {
+    lines.push("\nYour Request:")
+    lines.push(state.userPrompt)
+  }
+
+  // Display OpenCode response
   if (state.textParts.length > 0) {
-    lines.push("\nResult:")
+    lines.push("\nOpencode Response:")
     lines.push(state.textParts.join(""))
   }
 
@@ -453,6 +461,29 @@ export default async function OpenclawPlugin({}: PluginInput) {
       }
 
       switch (eventType) {
+        case "message.created": {
+          const { info } = props
+          if (!info?.sessionID || !info?.id) return
+
+          const state = sessionRegistry.get(info.sessionID)
+          if (!state) return
+
+          // Store user's first message (user prompt)
+          if (info.role === "user" && !state.userPrompt) {
+            // Try to get text from parts if available
+            const parts = props.parts || []
+            const textParts = parts.filter((p: any) => p.type === "text")
+            if (textParts.length > 0) {
+              state.userPrompt = textParts.map((p: any) => p.text).join("")
+              logger.debug("User prompt captured", {
+                sessionId: info.sessionID,
+                promptLength: state.userPrompt.length,
+              })
+            }
+          }
+          break
+        }
+
         case "message.part.updated": {
           const part = props.part
           if (!part?.sessionID) return
