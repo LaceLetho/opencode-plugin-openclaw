@@ -93,6 +93,25 @@ const readBody = (req: any): Promise<string> => {
   })
 }
 
+/**
+ * Clean oh-my-opencode injected content from user prompt
+ * Removes system-reminder tags and OMO internal markers
+ */
+const cleanUserPrompt = (prompt: string): string => {
+  if (!prompt) return prompt
+
+  // Remove <system-reminder>...</system-reminder> blocks
+  let cleaned = prompt.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+
+  // Remove <!-- OMO_INTERNAL_INITIATOR --> marker
+  cleaned = cleaned.replace(/<!--\s*OMO_INTERNAL_INITIATOR\s*-->/g, "")
+
+  // Trim whitespace and extra newlines
+  cleaned = cleaned.trim()
+
+  return cleaned
+}
+
 const formatCallbackMessage = (sessionId: string, state: SessionState): string => {
   const lines: string[] = []
 
@@ -103,17 +122,19 @@ const formatCallbackMessage = (sessionId: string, state: SessionState): string =
   }
 
   if (state.hasError) {
-    lines.push(`Task failed: ${sessionId}`)
+    lines.push(`Task completed with error`)
     if (state.errorMessage) {
       lines.push(`\nError:\n${state.errorMessage}`)
     }
   } else {
-    lines.push(`Task completed: ${sessionId}`)
+    lines.push(`Task completed successfully`)
   }
+  lines.push(`sessionId: ${sessionId}`)
 
   // Display user request if available
   // Try userPrompt first (from event extraction), fallback to config.prompt (from registration)
-  const userPrompt = state.userPrompt || state.config.prompt
+  const rawUserPrompt = state.userPrompt || state.config.prompt
+  const userPrompt = cleanUserPrompt(rawUserPrompt)
   if (userPrompt) {
     lines.push("\nYour Request:")
     lines.push(userPrompt)
