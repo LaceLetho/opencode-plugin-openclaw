@@ -134,18 +134,6 @@ const formatCallbackMessage = (sessionId: string, state: SessionState): string =
     lines.push(combinedText)
   }
 
-  if (state.toolOutputs.length > 0) {
-    lines.push("\n\nTools executed:")
-    for (const tool of state.toolOutputs) {
-      lines.push(`\n[${tool.tool}]:`)
-      if (tool.error) {
-        lines.push(`  Error: ${tool.error}`)
-      } else {
-        lines.push(`  ${tool.output}`)
-      }
-    }
-  }
-
   return lines.join("\n")
 }
 
