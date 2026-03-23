@@ -1,6 +1,6 @@
 {
   "name": "@laceletho/plugin-openclaw",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "OpenCode plugin for async task execution with OpenClaw callback",
   "type": "module",
   "main": "./dist/index.js",
