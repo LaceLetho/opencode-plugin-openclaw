@@ -28,6 +28,8 @@ interface SessionState {
   userPrompt?: string // Store user's original question
   userMessageId?: string // Track the first user message ID
   processedPartIDs: Set<string> // Track already processed partIDs to avoid duplicates
+  registeredAt: number // Timestamp when session was registered
+  completed: boolean // Whether callback has been triggered
 }
 
 // Global singleton to track server instance across plugin reloads
@@ -217,6 +219,12 @@ const sendCallback = async (sessionId: string, state: SessionState): Promise<voi
 }
 
 const handleSessionComplete = async (sessionId: string, state: SessionState) => {
+  if (state.completed) {
+    logger.debug("Callback already triggered for session, skipping", { sessionId })
+    return
+  }
+
+  state.completed = true
   logger.info("Session completed, triggering callback", {
     sessionId,
     status: state.status,
@@ -401,6 +409,8 @@ export default async function OpenclawPlugin({ }: PluginInput) {
           partTypes: new Map(),
           messageRoles: new Map(),
           processedPartIDs: new Set(),
+          registeredAt: Date.now(),
+          completed: false,
         })
 
         const registeredConfig = sessionRegistry.get(sessionId)!.config
@@ -725,21 +735,26 @@ export default async function OpenclawPlugin({ }: PluginInput) {
           state.hasError = true
           state.errorMessage = error?.message || String(error)
 
-          logger.error("Session error received", {
+          logger.error("Session error received, triggering callback", {
             sessionId: sessionID,
             error: state.errorMessage,
           })
+
+          await handleSessionComplete(sessionID, state)
           break
         }
 
         case "session.deleted": {
           const sessionId = props.sessionID || props.info?.id
           if (sessionId && sessionRegistry.has(sessionId)) {
-            logger.info("Session deleted, removing callback registration", {
+            const state = sessionRegistry.get(sessionId)!
+            logger.info("Session deleted, triggering callback before cleanup", {
               sessionId,
               wasTracked: true,
+              hasText: state.textParts.length > 0,
+              hasTools: state.toolOutputs.length > 0,
             })
-            sessionRegistry.delete(sessionId)
+            await handleSessionComplete(sessionId, state)
           }
           break
         }
