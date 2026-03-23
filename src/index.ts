@@ -315,6 +315,7 @@ export default async function OpenclawPlugin({ }: PluginInput) {
           switch (eventType) {
             case "message.part.updated":
             case "message.part.delta":
+            case "session.status":
             case "session.idle":
             case "session.error":
             case "session.deleted": {
@@ -700,8 +701,38 @@ export default async function OpenclawPlugin({ }: PluginInput) {
           break
         }
 
+        case "session.status": {
+          const { sessionID, status } = props
+          if (!sessionID) {
+            logger.warn("No sessionID in session.status event", { event, props })
+            return
+          }
+
+          // Only handle idle status
+          if (status?.type !== "idle") {
+            logger.debug("Ignoring non-idle session status", { sessionID, statusType: status?.type })
+            return
+          }
+
+          const state = sessionRegistry.get(sessionID)
+          if (!state) {
+            logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
+            return
+          }
+
+          logger.info("Session idle (via session.status), triggering callback", {
+            sessionId: sessionID,
+            hasText: state.textParts.length > 0,
+            hasTools: state.toolOutputs.length > 0,
+          })
+
+          await handleSessionComplete(sessionID, state)
+          break
+        }
+
+        // Keep session.idle for backward compatibility (deprecated in OpenCode)
         case "session.idle": {
-          logger.info("Received session.idle event", { event: JSON.stringify(event) })
+          logger.info("Received deprecated session.idle event", { event: JSON.stringify(event) })
 
           const sessionID = props.sessionID
           if (!sessionID) {
@@ -715,7 +746,7 @@ export default async function OpenclawPlugin({ }: PluginInput) {
             return
           }
 
-          logger.info("Session idle, triggering callback", {
+          logger.info("Session idle (via deprecated session.idle), triggering callback", {
             sessionId: sessionID,
             hasText: state.textParts.length > 0,
             hasTools: state.toolOutputs.length > 0,
