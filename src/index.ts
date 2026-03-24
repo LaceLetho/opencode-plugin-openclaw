@@ -48,6 +48,7 @@ declare global {
     isRunning: boolean
     startTime: number
     poller: ReturnType<typeof setInterval> | null
+    client: PluginInput["client"] | null
   }
 }
 
@@ -58,6 +59,7 @@ if (!globalThis.__openclawPluginServer) {
     isRunning: false,
     startTime: 0,
     poller: null,
+    client: null,
   }
 }
 
@@ -281,6 +283,169 @@ const getSession = async (client: PluginInput["client"], sessionId: string): Pro
   return {
     error: "Unable to load session with any supported SDK shape",
   }
+}
+
+const rebuildStateFromMessages = async (client: PluginInput["client"], sessionId: string, state: SessionState) => {
+  const result = await client.session.messages({
+    path: { id: sessionId },
+    query: { limit: 100 },
+  })
+  if (result.error) {
+    logger.warn("Failed to fetch session messages", {
+      sessionId,
+      error: result.error,
+    })
+    return
+  }
+
+  const messages = result.data || []
+  state.textParts = []
+  state.toolOutputs = []
+  state.partTypes.clear()
+  state.messageRoles.clear()
+  state.processedPartIDs.clear()
+  state.hasError = false
+  state.errorMessage = undefined
+  state.userPrompt = undefined
+  state.userMessageId = undefined
+
+  for (const msg of messages) {
+    if (!msg?.info?.id) continue
+
+    state.messageRoles.set(msg.info.id, msg.info.role)
+
+    if (msg.info.role === "user" && !state.userMessageId) {
+      state.userMessageId = msg.info.id
+    }
+
+    for (const part of msg.parts || []) {
+      if (!part?.id) continue
+
+      state.partTypes.set(part.id, part.type)
+      state.processedPartIDs.add(part.id)
+
+      if (part.type === "text" && part.text) {
+        if (msg.info.role === "user" || msg.info.id === state.userMessageId) {
+          state.userPrompt = `${state.userPrompt || ""}${part.text}`
+          continue
+        }
+
+        state.textParts.push(part.text)
+        continue
+      }
+
+      if (part.type !== "tool" || !part.state) continue
+
+      if (part.state.status === "completed") {
+        state.toolOutputs.push({
+          tool: part.tool,
+          output: part.state.output || "(no output)",
+        })
+        continue
+      }
+
+      if (part.state.status !== "error") continue
+
+      state.hasError = true
+      state.toolOutputs.push({
+        tool: part.tool,
+        output: "",
+        error: part.state.error || "Unknown error",
+      })
+    }
+  }
+
+  logger.info("Session messages rebuilt from API", {
+    sessionId,
+    messages: messages.length,
+    textParts: state.textParts.length,
+    toolOutputs: state.toolOutputs.length,
+    hasUserPrompt: !!state.userPrompt,
+    hasError: state.hasError,
+  })
+}
+
+const checkSessionCompletion = async (sessionId: string, state: SessionState) => {
+  if (state.completed) return
+
+  const client = globalThis.__openclawPluginServer.client
+  if (!client) {
+    logger.warn("Session poll skipped because plugin client is unavailable", { sessionId })
+    return
+  }
+
+  const sessionResult = await getSession(client, sessionId)
+  if (sessionResult.error) {
+    logger.warn("Session poll failed", {
+      sessionId,
+      error: sessionResult.error,
+    })
+    return
+  }
+
+  const session = sessionResult.data
+  if (!session?.directory) {
+    logger.warn("Session poll returned no directory", { sessionId })
+    return
+  }
+
+  const statusResult = await client.session.status({
+    query: { directory: session.directory },
+  })
+  if (statusResult.error) {
+    logger.warn("Session status poll failed", {
+      sessionId,
+      error: statusResult.error,
+    })
+    return
+  }
+
+  const status = statusResult.data?.[sessionId]
+  if (status && status.type !== "idle") return
+
+  state.status = status?.type || "idle"
+  await rebuildStateFromMessages(client, sessionId, state)
+
+  logger.info("Session idle (via poller), triggering callback", {
+    sessionId,
+    hasText: state.textParts.length > 0,
+    hasTools: state.toolOutputs.length > 0,
+  })
+
+  await handleSessionComplete(sessionId, state)
+}
+
+const ensurePoller = () => {
+  const singleton = globalThis.__openclawPluginServer
+  if (singleton.poller) return
+
+  singleton.poller = setInterval(() => {
+    const entries = Array.from(sessionRegistry.entries())
+    if (entries.length === 0) return
+
+    void (async () => {
+      for (const [sessionId, state] of entries) {
+        await checkSessionCompletion(sessionId, state)
+      }
+    })()
+  }, POLL_INTERVAL_MS)
+
+  logger.info("Session completion poller started", {
+    intervalMs: POLL_INTERVAL_MS,
+  })
+}
+
+const ensureSessionPoller = (sessionId: string, state: SessionState) => {
+  if (state.poller) return
+
+  state.poller = setInterval(() => {
+    void checkSessionCompletion(sessionId, state)
+  }, POLL_INTERVAL_MS)
+
+  logger.info("Per-session completion poller started", {
+    sessionId,
+    intervalMs: POLL_INTERVAL_MS,
+  })
 }
 
 const handleEvent = async (event: any) => {
@@ -624,6 +789,7 @@ export default async function OpenclawPlugin({ client }: PluginInput) {
 
   // Check if server is already running (from previous plugin instance)
   const singleton = globalThis.__openclawPluginServer
+  singleton.client = client
 
   if (singleton.isRunning && singleton.server) {
     // Verify the server is still responding
@@ -672,79 +838,6 @@ export default async function OpenclawPlugin({ client }: PluginInput) {
       port: pluginConfig.port,
     })
     throw new Error(`Port ${pluginConfig.port} is already in use`)
-  }
-
-  const checkSessionCompletion = async (sessionId: string, state: SessionState) => {
-    if (state.completed) return
-
-    const sessionResult = await getSession(client, sessionId)
-    if (sessionResult.error) {
-      logger.warn("Session poll failed", {
-        sessionId,
-        error: sessionResult.error,
-      })
-      return
-    }
-
-    const session = sessionResult.data
-    if (!session) {
-      logger.warn("Session poll returned no data", { sessionId })
-      return
-    }
-
-    const statusResult = await client.session.status({
-      query: { directory: session.directory },
-    })
-    if (statusResult.error) {
-      logger.warn("Session status poll failed", {
-        sessionId,
-        error: statusResult.error,
-      })
-      return
-    }
-
-    const status = statusResult.data?.[sessionId]
-    if (status && status.type !== "idle") return
-
-    logger.info("Session idle (via poller), triggering callback", {
-      sessionId,
-      hasText: state.textParts.length > 0,
-      hasTools: state.toolOutputs.length > 0,
-    })
-
-    await handleSessionComplete(sessionId, state)
-  }
-
-  const ensurePoller = () => {
-    if (singleton.poller) return
-
-    singleton.poller = setInterval(() => {
-      const entries = Array.from(sessionRegistry.entries())
-      if (entries.length === 0) return
-
-      void (async () => {
-        for (const [sessionId, state] of entries) {
-          await checkSessionCompletion(sessionId, state)
-        }
-      })()
-    }, POLL_INTERVAL_MS)
-
-    logger.info("Session completion poller started", {
-      intervalMs: POLL_INTERVAL_MS,
-    })
-  }
-
-  const ensureSessionPoller = (sessionId: string, state: SessionState) => {
-    if (state.poller) return
-
-    state.poller = setInterval(() => {
-      void checkSessionCompletion(sessionId, state)
-    }, POLL_INTERVAL_MS)
-
-    logger.info("Per-session completion poller started", {
-      sessionId,
-      intervalMs: POLL_INTERVAL_MS,
-    })
   }
 
   const server = createServer(async (req, res) => {
