@@ -39,6 +39,7 @@ declare global {
     server: ReturnType<typeof createServer> | null
     isRunning: boolean
     startTime: number
+    poller: ReturnType<typeof setInterval> | null
   }
 }
 
@@ -48,6 +49,7 @@ if (!globalThis.__openclawPluginServer) {
     server: null,
     isRunning: false,
     startTime: 0,
+    poller: null,
   }
 }
 
@@ -57,6 +59,8 @@ let pluginConfig: OpenclawConfig = {
   port: 9090,
   openclawApiKey: "",
 }
+
+const POLL_INTERVAL_MS = 3000
 
 /**
  * Logger utility for structured logging to stdout
@@ -278,7 +282,7 @@ const checkExistingServer = async (port: number): Promise<boolean> => {
   }
 }
 
-export default async function OpenclawPlugin({ }: PluginInput) {
+export default async function OpenclawPlugin({ client }: PluginInput) {
   logger.info("Initializing OpenClaw plugin", { port: pluginConfig.port })
 
   // Check if server is already running (from previous plugin instance)
@@ -352,6 +356,68 @@ export default async function OpenclawPlugin({ }: PluginInput) {
     throw new Error(`Port ${pluginConfig.port} is already in use`)
   }
 
+  const checkSessionCompletion = async (sessionId: string, state: SessionState) => {
+    if (state.completed) return
+
+    const sessionResult = await client.session.get({
+      path: { id: sessionId },
+    })
+    if (sessionResult.error) {
+      logger.warn("Session poll failed", {
+        sessionId,
+        error: sessionResult.error,
+      })
+      return
+    }
+
+    const session = sessionResult.data
+    if (!session) {
+      logger.warn("Session poll returned no data", { sessionId })
+      return
+    }
+
+    const statusResult = await client.session.status({
+      query: { directory: session.directory },
+    })
+    if (statusResult.error) {
+      logger.warn("Session status poll failed", {
+        sessionId,
+        error: statusResult.error,
+      })
+      return
+    }
+
+    const status = statusResult.data?.[sessionId]
+    if (status && status.type !== "idle") return
+
+    logger.info("Session idle (via poller), triggering callback", {
+      sessionId,
+      hasText: state.textParts.length > 0,
+      hasTools: state.toolOutputs.length > 0,
+    })
+
+    await handleSessionComplete(sessionId, state)
+  }
+
+  const ensurePoller = () => {
+    if (singleton.poller) return
+
+    singleton.poller = setInterval(() => {
+      const entries = Array.from(sessionRegistry.entries())
+      if (entries.length === 0) return
+
+      void (async () => {
+        for (const [sessionId, state] of entries) {
+          await checkSessionCompletion(sessionId, state)
+        }
+      })()
+    }, POLL_INTERVAL_MS)
+
+    logger.info("Session completion poller started", {
+      intervalMs: POLL_INTERVAL_MS,
+    })
+  }
+
   const server = createServer(async (req, res) => {
     const url = req.url || "/"
     const method = req.method || "GET"
@@ -403,6 +469,7 @@ export default async function OpenclawPlugin({ }: PluginInput) {
             channel: callbackConfig.channel || "telegram",
             deliver: callbackConfig.deliver ?? true,
             to: callbackConfig.to,
+            prompt: callbackConfig.prompt,
           },
           textParts: [],
           toolOutputs: [],
@@ -425,6 +492,8 @@ export default async function OpenclawPlugin({ }: PluginInput) {
           apiKeySource: callbackConfig.apiKey ? "provided" : (pluginConfig.openclawApiKey ? "env" : "none"),
           totalRegistered: sessionRegistry.size,
         })
+
+        ensurePoller()
 
         res.writeHead(200)
         res.end(JSON.stringify({ ok: true, sessionId }))
@@ -799,6 +868,11 @@ export default async function OpenclawPlugin({ }: PluginInput) {
       if (singleton.server === server) {
         singleton.isRunning = false
         singleton.server = null
+        if (singleton.poller) {
+          clearInterval(singleton.poller)
+          singleton.poller = null
+          logger.info("Session completion poller stopped")
+        }
         server.close((err) => {
           if (err) {
             logger.error("Error closing server", { error: err.message })
