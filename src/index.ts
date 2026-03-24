@@ -1,4 +1,5 @@
 import { createServer } from "http"
+import net from "net"
 import type { PluginInput } from "@opencode-ai/plugin"
 
 export interface OpenclawConfig {
@@ -240,7 +241,6 @@ const handleSessionComplete = async (sessionId: string, state: SessionState) => 
  */
 const isPortInUse = (port: number): Promise<boolean> => {
   return new Promise((resolve) => {
-    const net = require("net")
     const client = net.createConnection({ port, host: "127.0.0.1", timeout: 500 })
 
     client.on("connect", () => {
