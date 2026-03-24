@@ -31,6 +31,7 @@ interface SessionState {
   processedPartIDs: Set<string> // Track already processed partIDs to avoid duplicates
   registeredAt: number // Timestamp when session was registered
   completed: boolean // Whether callback has been triggered
+  poller?: ReturnType<typeof setInterval>
 }
 
 type SessionGetResult = {
@@ -237,6 +238,11 @@ const handleSessionComplete = async (sessionId: string, state: SessionState) => 
   }
 
   state.completed = true
+  if (state.poller) {
+    clearInterval(state.poller)
+    state.poller = undefined
+    logger.info("Session poller stopped", { sessionId })
+  }
   logger.info("Session completed, triggering callback", {
     sessionId,
     status: state.status,
@@ -728,6 +734,19 @@ export default async function OpenclawPlugin({ client }: PluginInput) {
     })
   }
 
+  const ensureSessionPoller = (sessionId: string, state: SessionState) => {
+    if (state.poller) return
+
+    state.poller = setInterval(() => {
+      void checkSessionCompletion(sessionId, state)
+    }, POLL_INTERVAL_MS)
+
+    logger.info("Per-session completion poller started", {
+      sessionId,
+      intervalMs: POLL_INTERVAL_MS,
+    })
+  }
+
   const server = createServer(async (req, res) => {
     const url = req.url || "/"
     const method = req.method || "GET"
@@ -792,6 +811,7 @@ export default async function OpenclawPlugin({ client }: PluginInput) {
         })
 
         const registeredConfig = sessionRegistry.get(sessionId)!.config
+        const registeredState = sessionRegistry.get(sessionId)!
         logger.info("Callback registered successfully", {
           sessionId,
           callbackUrl: callbackConfig.url,
@@ -804,6 +824,7 @@ export default async function OpenclawPlugin({ client }: PluginInput) {
         })
 
         ensurePoller()
+        ensureSessionPoller(sessionId, registeredState)
 
         res.writeHead(200)
         res.end(JSON.stringify({ ok: true, sessionId }))
