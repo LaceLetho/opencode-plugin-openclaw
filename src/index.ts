@@ -33,6 +33,13 @@ interface SessionState {
   completed: boolean // Whether callback has been triggered
 }
 
+type SessionGetResult = {
+  data?: {
+    directory?: string
+  }
+  error?: unknown
+}
+
 // Global singleton to track server instance across plugin reloads
 declare global {
   var __openclawPluginServer: {
@@ -240,6 +247,330 @@ const handleSessionComplete = async (sessionId: string, state: SessionState) => 
   logger.info("Session removed from registry", { sessionId, remainingSessions: sessionRegistry.size })
 }
 
+const getSession = async (client: PluginInput["client"], sessionId: string): Promise<SessionGetResult> => {
+  const api = client.session as any
+  const attempts = [
+    async () => api.get({ path: { id: sessionId } }),
+    async () => api.get({ path: { sessionID: sessionId } }),
+    async () => api.get({ sessionID: sessionId }),
+  ]
+
+  for (const attempt of attempts) {
+    try {
+      const result = await attempt()
+      if (!result?.error && result?.data) {
+        return result
+      }
+      if (result?.error) {
+        return result
+      }
+    } catch (err) {
+      logger.debug("Session lookup attempt failed", {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+
+  return {
+    error: "Unable to load session with any supported SDK shape",
+  }
+}
+
+const handleEvent = async (event: any) => {
+  const eventType = event?.type
+
+  if (!eventType) return
+
+  const props = event.properties || {}
+
+  if (eventType.includes("session") || eventType.includes("message")) {
+    logger.info(`Received event: ${eventType}`, {
+      sessionID: props.sessionID,
+      propertiesKeys: Object.keys(props),
+    })
+  }
+
+  switch (eventType) {
+    case "message.created":
+    case "message.updated": {
+      logger.warn("TRACK_MESSAGE", { eventType, hasProps: !!props, hasInfo: !!props.info })
+      const info = props.info
+      if (!info?.sessionID || !info?.id) return
+
+      const state = sessionRegistry.get(info.sessionID)
+      if (!state) return
+
+      state.messageRoles.set(info.id, info.role)
+
+      if (info.role === "user" && !state.userMessageId) {
+        state.userMessageId = info.id
+        logger.debug("User message tracked", {
+          sessionId: info.sessionID,
+          messageId: info.id,
+        })
+      }
+      return
+    }
+
+    case "message.part.updated": {
+      const part = props.part
+      if (!part?.sessionID) return
+
+      const state = sessionRegistry.get(part.sessionID)
+      if (!state) return
+
+      state.partTypes.set(part.id, part.type)
+
+      logger.debug("Message part updated", {
+        sessionId: part.sessionID,
+        partType: part.type,
+        partId: part.id,
+      })
+
+      if (part.type === "text" && part.text) {
+        const messageRole = state.messageRoles.get(part.messageID)
+        if (messageRole === "user" || part.messageID === state.userMessageId) {
+          state.userPrompt = state.userPrompt || ""
+          state.userPrompt += part.text
+          logger.debug("User prompt text accumulated", {
+            sessionId: part.sessionID,
+            textLength: part.text.length,
+            totalLength: state.userPrompt.length,
+          })
+          return
+        }
+
+        if (state.processedPartIDs.has(part.id)) {
+          logger.warn("[DEBUG] SKIPPING message.part.updated - part already processed via delta", {
+            sessionId: part.sessionID,
+            partId: part.id,
+            textLength: part.text.length,
+            processedCount: state.processedPartIDs.size,
+          })
+          return
+        }
+
+        state.processedPartIDs.add(part.id)
+
+        logger.warn("[DEBUG] Adding text via message.part.updated", {
+          sessionId: part.sessionID,
+          messageId: part.messageID,
+          partId: part.id,
+          textLength: part.text.length,
+          textPreview: part.text.substring(0, 100),
+          currentTextPartsCount: state.textParts.length,
+          processedCount: state.processedPartIDs.size,
+        })
+
+        state.textParts.push(part.text)
+
+        logger.debug("Text part accumulated", {
+          sessionId: part.sessionID,
+          textLength: part.text.length,
+          totalParts: state.textParts.length,
+        })
+        return
+      }
+
+      if (part.type === "tool" && part.state) {
+        if (part.state.status === "completed") {
+          state.toolOutputs.push({
+            tool: part.tool,
+            output: part.state.output || "(no output)",
+          })
+          logger.debug("Tool execution completed", {
+            sessionId: part.sessionID,
+            tool: part.tool,
+            totalTools: state.toolOutputs.length,
+          })
+          return
+        }
+
+        if (part.state.status === "error") {
+          state.hasError = true
+          state.toolOutputs.push({
+            tool: part.tool,
+            output: "",
+            error: part.state.error || "Unknown error",
+          })
+          logger.warn("Tool execution failed", {
+            sessionId: part.sessionID,
+            tool: part.tool,
+            error: part.state.error,
+          })
+          return
+        }
+      }
+
+      if (part.type === "reasoning") {
+        logger.debug("Reasoning part received", { sessionId: part.sessionID })
+      }
+      return
+    }
+
+    case "message.part.delta": {
+      const sessionID = props.sessionID
+      const messageID = props.messageID
+      const partID = props.partID
+      const field = props.field
+      const delta = props.delta
+      if (!sessionID || field !== "text" || !delta || !partID || !messageID) return
+
+      const state = sessionRegistry.get(sessionID)
+      if (!state) return
+
+      const partType = state.partTypes.get(partID)
+      if (partType !== "text") {
+        logger.debug("Skipping delta for non-text part", {
+          sessionId: sessionID,
+          partId: partID,
+          partType: partType || "unknown",
+        })
+        return
+      }
+
+      const messageRole = state.messageRoles.get(messageID)
+      if (messageRole === "user" || messageID === state.userMessageId) {
+        state.userPrompt = state.userPrompt || ""
+        state.userPrompt += delta
+        logger.debug("User prompt delta received", {
+          sessionId: sessionID,
+          deltaLength: delta.length,
+          totalLength: state.userPrompt.length,
+        })
+        return
+      }
+
+      const lastPart = state.textParts.length > 0 ? state.textParts[state.textParts.length - 1] : null
+      const isFirstDeltaForPart = !state.processedPartIDs.has(partID)
+
+      logger.warn("[DEBUG] Adding text via message.part.delta", {
+        sessionId: sessionID,
+        messageId: messageID,
+        partId: partID,
+        deltaLength: delta.length,
+        deltaPreview: delta.substring(0, 100),
+        currentTextPartsCount: state.textParts.length,
+        isAppending: state.textParts.length > 0,
+        isFirstDeltaForPart,
+        lastPartLength: lastPart ? lastPart.length : 0,
+        lastPartPreview: lastPart ? lastPart.substring(0, 100) : null,
+        textPartsArray: state.textParts,
+      })
+
+      state.processedPartIDs.add(partID)
+
+      if (state.textParts.length > 0) {
+        state.textParts[state.textParts.length - 1] += delta
+        logger.warn("[DEBUG] Appended delta to existing text part", {
+          sessionId: sessionID,
+          partId: partID,
+          newLength: state.textParts[state.textParts.length - 1].length,
+          newPreview: state.textParts[state.textParts.length - 1].substring(0, 100),
+        })
+        return
+      }
+
+      state.textParts.push(delta)
+      logger.warn("[DEBUG] Pushed new text part from delta (was empty)", {
+        sessionId: sessionID,
+        partId: partID,
+      })
+      return
+    }
+
+    case "session.status": {
+      const sessionID = props.sessionID
+      const status = props.status
+      if (!sessionID) {
+        logger.warn("No sessionID in session.status event", { event, props })
+        return
+      }
+
+      if (status?.type !== "idle") {
+        logger.debug("Ignoring non-idle session status", { sessionID, statusType: status?.type })
+        return
+      }
+
+      const state = sessionRegistry.get(sessionID)
+      if (!state) {
+        logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
+        return
+      }
+
+      logger.info("Session idle (via session.status), triggering callback", {
+        sessionId: sessionID,
+        hasText: state.textParts.length > 0,
+        hasTools: state.toolOutputs.length > 0,
+      })
+
+      await handleSessionComplete(sessionID, state)
+      return
+    }
+
+    case "session.idle": {
+      logger.info("Received deprecated session.idle event", { event: JSON.stringify(event) })
+
+      const sessionID = props.sessionID
+      if (!sessionID) {
+        logger.warn("No sessionID in session.idle event", { event, props })
+        return
+      }
+
+      const state = sessionRegistry.get(sessionID)
+      if (!state) {
+        logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
+        return
+      }
+
+      logger.info("Session idle (via deprecated session.idle), triggering callback", {
+        sessionId: sessionID,
+        hasText: state.textParts.length > 0,
+        hasTools: state.toolOutputs.length > 0,
+      })
+
+      await handleSessionComplete(sessionID, state)
+      return
+    }
+
+    case "session.error": {
+      const sessionID = props.sessionID
+      const error = props.error
+      if (!sessionID) return
+
+      const state = sessionRegistry.get(sessionID)
+      if (!state) return
+
+      state.hasError = true
+      state.errorMessage = error?.message || String(error)
+
+      logger.error("Session error received, triggering callback", {
+        sessionId: sessionID,
+        error: state.errorMessage,
+      })
+
+      await handleSessionComplete(sessionID, state)
+      return
+    }
+
+    case "session.deleted": {
+      const sessionId = props.sessionID || props.info?.id
+      if (!sessionId || !sessionRegistry.has(sessionId)) return
+
+      const state = sessionRegistry.get(sessionId)!
+      logger.info("Session deleted, triggering callback before cleanup", {
+        sessionId,
+        wasTracked: true,
+        hasText: state.textParts.length > 0,
+        hasTools: state.toolOutputs.length > 0,
+      })
+      await handleSessionComplete(sessionId, state)
+      return
+    }
+  }
+}
+
 /**
  * Check if a port is already in use by attempting to connect
  */
@@ -311,26 +642,7 @@ export default async function OpenclawPlugin({ client }: PluginInput) {
         },
 
         event: async ({ event }: { event: any }) => {
-          // Event handling is still active from the original instance
-          // But we need to handle events in this instance too for sessionRegistry
-          const eventType = event?.type
-          if (!eventType) return
-
-          switch (eventType) {
-            case "message.part.updated":
-            case "message.part.delta":
-            case "session.status":
-            case "session.idle":
-            case "session.error":
-            case "session.deleted": {
-              // These events are handled by the original instance
-              // But we log them for visibility
-              logger.debug(`Event received by secondary instance: ${eventType}`, {
-                sessionID: event.sessionID,
-              })
-              break
-            }
-          }
+          await handleEvent(event)
         },
 
         dispose: async () => {
@@ -359,9 +671,7 @@ export default async function OpenclawPlugin({ client }: PluginInput) {
   const checkSessionCompletion = async (sessionId: string, state: SessionState) => {
     if (state.completed) return
 
-    const sessionResult = await client.session.get({
-      path: { id: sessionId },
-    })
+    const sessionResult = await getSession(client, sessionId)
     if (sessionResult.error) {
       logger.warn("Session poll failed", {
         sessionId,
@@ -551,314 +861,7 @@ export default async function OpenclawPlugin({ client }: PluginInput) {
 
     // Use 'event' hook to receive all events, then filter by type
     event: async ({ event }: { event: any }) => {
-      const eventType = event?.type
-
-      if (!eventType) return
-
-      // Extract properties from the event (OpenCode SDK event structure)
-      const props = event.properties || {}
-
-      // Log all session and message events for debugging
-      if (eventType.includes("session") || eventType.includes("message")) {
-        logger.info(`Received event: ${eventType}`, {
-          sessionID: props.sessionID,
-          propertiesKeys: Object.keys(props),
-        })
-      }
-
-      switch (eventType) {
-        case "message.created":
-        case "message.updated": {
-          logger.warn("TRACK_MESSAGE", { eventType, hasProps: !!props, hasInfo: !!props.info })
-          const { info } = props
-          if (!info?.sessionID || !info?.id) return
-
-          const state = sessionRegistry.get(info.sessionID)
-          if (!state) return
-
-          // Track message role for later use
-          state.messageRoles.set(info.id, info.role)
-
-          // Track the first user message ID
-          if (info.role === "user" && !state.userMessageId) {
-            state.userMessageId = info.id
-            logger.debug("User message tracked", {
-              sessionId: info.sessionID,
-              messageId: info.id,
-            })
-          }
-          break
-        }
-
-        case "message.part.updated": {
-          const part = props.part
-          if (!part?.sessionID) return
-
-          const state = sessionRegistry.get(part.sessionID)
-          if (!state) return
-
-          // Store part type to filter reasoning content from deltas
-          state.partTypes.set(part.id, part.type)
-
-          logger.debug("Message part updated", {
-            sessionId: part.sessionID,
-            partType: part.type,
-            partId: part.id,
-          })
-
-          switch (part.type) {
-            case "text": {
-              if (part.text) {
-                // Check if this is the user message or assistant message
-                const messageRole = state.messageRoles.get(part.messageID)
-                if (messageRole === "user" || part.messageID === state.userMessageId) {
-                  // This is user's question
-                  if (!state.userPrompt) {
-                    state.userPrompt = ""
-                  }
-                  state.userPrompt += part.text
-                  logger.debug("User prompt text accumulated", {
-                    sessionId: part.sessionID,
-                    textLength: part.text.length,
-                    totalLength: state.userPrompt.length,
-                  })
-                } else {
-                  // This is assistant's response
-                  // Check if this part was already processed (via delta events)
-                  if (state.processedPartIDs.has(part.id)) {
-                    logger.warn("[DEBUG] SKIPPING message.part.updated - part already processed via delta", {
-                      sessionId: part.sessionID,
-                      partId: part.id,
-                      textLength: part.text.length,
-                      processedCount: state.processedPartIDs.size,
-                    })
-                    break
-                  }
-
-                  // Mark this part as processed
-                  state.processedPartIDs.add(part.id)
-
-                  logger.warn("[DEBUG] Adding text via message.part.updated", {
-                    sessionId: part.sessionID,
-                    messageId: part.messageID,
-                    partId: part.id,
-                    textLength: part.text.length,
-                    textPreview: part.text.substring(0, 100),
-                    currentTextPartsCount: state.textParts.length,
-                    processedCount: state.processedPartIDs.size,
-                  })
-
-                  state.textParts.push(part.text)
-
-                  logger.debug("Text part accumulated", {
-                    sessionId: part.sessionID,
-                    textLength: part.text.length,
-                    totalParts: state.textParts.length,
-                  })
-                }
-              }
-              break
-            }
-            case "tool": {
-              if (part.state) {
-                switch (part.state.status) {
-                  case "completed":
-                    state.toolOutputs.push({
-                      tool: part.tool,
-                      output: part.state.output || "(no output)",
-                    })
-                    logger.debug("Tool execution completed", {
-                      sessionId: part.sessionID,
-                      tool: part.tool,
-                      totalTools: state.toolOutputs.length,
-                    })
-                    break
-                  case "error":
-                    state.hasError = true
-                    state.toolOutputs.push({
-                      tool: part.tool,
-                      output: "",
-                      error: part.state.error || "Unknown error",
-                    })
-                    logger.warn("Tool execution failed", {
-                      sessionId: part.sessionID,
-                      tool: part.tool,
-                      error: part.state.error,
-                    })
-                    break
-                }
-              }
-              break
-            }
-            case "reasoning": {
-              logger.debug("Reasoning part received", { sessionId: part.sessionID })
-              break
-            }
-          }
-          break
-        }
-
-        case "message.part.delta": {
-          const { sessionID, messageID, partID, field, delta } = props
-          if (!sessionID || field !== "text" || !delta || !partID || !messageID) return
-
-          const state = sessionRegistry.get(sessionID)
-          if (!state) return
-
-          // Only accumulate text from text parts, not reasoning parts
-          const partType = state.partTypes.get(partID)
-          if (partType !== "text") {
-            logger.debug("Skipping delta for non-text part", {
-              sessionId: sessionID,
-              partId: partID,
-              partType: partType || "unknown",
-            })
-            return
-          }
-
-          // Check if this is the user message or assistant message
-          const messageRole = state.messageRoles.get(messageID)
-          if (messageRole === "user" || messageID === state.userMessageId) {
-            // This is user's question delta
-            if (!state.userPrompt) {
-              state.userPrompt = ""
-            }
-            state.userPrompt += delta
-            logger.debug("User prompt delta received", {
-              sessionId: sessionID,
-              deltaLength: delta.length,
-              totalLength: state.userPrompt.length,
-            })
-          } else {
-            // This is assistant's response delta
-            const lastPart = state.textParts.length > 0 ? state.textParts[state.textParts.length - 1] : null
-            const isFirstDeltaForPart = !state.processedPartIDs.has(partID)
-
-            logger.warn("[DEBUG] Adding text via message.part.delta", {
-              sessionId: sessionID,
-              messageId: messageID,
-              partId: partID,
-              deltaLength: delta.length,
-              deltaPreview: delta.substring(0, 100),
-              currentTextPartsCount: state.textParts.length,
-              isAppending: state.textParts.length > 0,
-              isFirstDeltaForPart,
-              lastPartLength: lastPart ? lastPart.length : 0,
-              lastPartPreview: lastPart ? lastPart.substring(0, 100) : null,
-              textPartsArray: state.textParts,
-            })
-
-            // Mark this part as being processed via delta
-            state.processedPartIDs.add(partID)
-
-            if (state.textParts.length > 0) {
-              state.textParts[state.textParts.length - 1] += delta
-              logger.warn("[DEBUG] Appended delta to existing text part", {
-                sessionId: sessionID,
-                partId: partID,
-                newLength: state.textParts[state.textParts.length - 1].length,
-                newPreview: state.textParts[state.textParts.length - 1].substring(0, 100),
-              })
-            } else {
-              state.textParts.push(delta)
-              logger.warn("[DEBUG] Pushed new text part from delta (was empty)", {
-                sessionId: sessionID,
-                partId: partID,
-              })
-            }
-          }
-          break
-        }
-
-        case "session.status": {
-          const { sessionID, status } = props
-          if (!sessionID) {
-            logger.warn("No sessionID in session.status event", { event, props })
-            return
-          }
-
-          // Only handle idle status
-          if (status?.type !== "idle") {
-            logger.debug("Ignoring non-idle session status", { sessionID, statusType: status?.type })
-            return
-          }
-
-          const state = sessionRegistry.get(sessionID)
-          if (!state) {
-            logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
-            return
-          }
-
-          logger.info("Session idle (via session.status), triggering callback", {
-            sessionId: sessionID,
-            hasText: state.textParts.length > 0,
-            hasTools: state.toolOutputs.length > 0,
-          })
-
-          await handleSessionComplete(sessionID, state)
-          break
-        }
-
-        // Keep session.idle for backward compatibility (deprecated in OpenCode)
-        case "session.idle": {
-          logger.info("Received deprecated session.idle event", { event: JSON.stringify(event) })
-
-          const sessionID = props.sessionID
-          if (!sessionID) {
-            logger.warn("No sessionID in session.idle event", { event, props })
-            return
-          }
-
-          const state = sessionRegistry.get(sessionID)
-          if (!state) {
-            logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
-            return
-          }
-
-          logger.info("Session idle (via deprecated session.idle), triggering callback", {
-            sessionId: sessionID,
-            hasText: state.textParts.length > 0,
-            hasTools: state.toolOutputs.length > 0,
-          })
-
-          await handleSessionComplete(sessionID, state)
-          break
-        }
-
-        case "session.error": {
-          const { sessionID, error } = props
-          if (!sessionID) return
-
-          const state = sessionRegistry.get(sessionID)
-          if (!state) return
-
-          state.hasError = true
-          state.errorMessage = error?.message || String(error)
-
-          logger.error("Session error received, triggering callback", {
-            sessionId: sessionID,
-            error: state.errorMessage,
-          })
-
-          await handleSessionComplete(sessionID, state)
-          break
-        }
-
-        case "session.deleted": {
-          const sessionId = props.sessionID || props.info?.id
-          if (sessionId && sessionRegistry.has(sessionId)) {
-            const state = sessionRegistry.get(sessionId)!
-            logger.info("Session deleted, triggering callback before cleanup", {
-              sessionId,
-              wasTracked: true,
-              hasText: state.textParts.length > 0,
-              hasTools: state.toolOutputs.length > 0,
-            })
-            await handleSessionComplete(sessionId, state)
-          }
-          break
-        }
-      }
+      await handleEvent(event)
     },
 
     dispose: async () => {
