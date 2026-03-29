@@ -132,11 +132,10 @@ const cleanUserPrompt = (prompt: string): string => {
 const formatCallbackMessage = (sessionId: string, state: SessionState): string => {
   const lines: string[] = []
 
-  // Add forwarding prefix if channel and to are specified
-  if (state.config.channel && state.config.to) {
-    lines.push(`Forward message below to ${state.config.channel} ${state.config.to}:`)
-    lines.push("")  // Empty line for separation
-  }
+  lines.push("Send the following OpenCode task result to the user as your next reply.")
+  lines.push("Do not summarize it as a webhook event. Do not say no action was taken.")
+  lines.push("Keep the result content intact, and present it as a normal assistant reply.")
+  lines.push("")
 
   if (state.hasError) {
     lines.push(`Task completed with error`)
@@ -183,6 +182,9 @@ const sendCallback = async (sessionId: string, state: SessionState): Promise<voi
     wakeMode: "now",
     deliver: state.config.deliver ?? true,
     channel: state.config.channel || "last",
+  }
+  if (state.config.to) {
+    payload.to = state.config.to
   }
 
   logger.info("Sending callback to OpenClaw", {
@@ -888,7 +890,7 @@ export default async function OpenclawPlugin({ client }: PluginInput) {
             url: callbackConfig.url,
             apiKey: callbackConfig.apiKey || pluginConfig.openclawApiKey,
             agentId: callbackConfig.agentId || "main",
-            channel: callbackConfig.channel || "telegram",
+            channel: callbackConfig.channel || "last",
             deliver: callbackConfig.deliver ?? true,
             to: callbackConfig.to,
             prompt: callbackConfig.prompt,

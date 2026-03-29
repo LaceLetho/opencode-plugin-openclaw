@@ -139,9 +139,12 @@ When a registered session completes, the plugin sends a POST request to the conf
   "agentId": "main",
   "wakeMode": "now",
   "deliver": true,
-  "channel": "last"
+  "channel": "last",
+  "to": "123456789"
 }
 ```
+
+`channel` and `to` are passed as top-level `/hooks/agent` fields so OpenClaw can route delivery directly. The callback `message` body should only contain the task result text.
 
 **Authentication:**
 ```

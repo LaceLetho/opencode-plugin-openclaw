@@ -13,7 +13,7 @@ export interface CallbackConfig {
   agentId?: string
   channel?: string
   deliver?: boolean
-  to?: string  // Target recipient for message forwarding
+  to?: string
 }
 
 // Removed: Config module extension for opencode.json
