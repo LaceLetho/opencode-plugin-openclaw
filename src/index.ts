@@ -101,6 +101,10 @@ const logger = {
   error: (message: string, meta?: Record<string, unknown>) => log("ERROR", message, meta),
 }
 
+const isVerboseEvent = (eventType: string) => {
+  return eventType === "message.part.delta" || eventType === "message.part.updated" || eventType === "message.updated"
+}
+
 const readBody = (req: any): Promise<string> => {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -458,7 +462,8 @@ const handleEvent = async (event: any) => {
   const props = event.properties || {}
 
   if (eventType.includes("session") || eventType.includes("message")) {
-    logger.info(`Received event: ${eventType}`, {
+    const write = isVerboseEvent(eventType) ? logger.debug : logger.info
+    write(`Received event: ${eventType}`, {
       sessionID: props.sessionID,
       propertiesKeys: Object.keys(props),
     })
@@ -467,7 +472,7 @@ const handleEvent = async (event: any) => {
   switch (eventType) {
     case "message.created":
     case "message.updated": {
-      logger.warn("TRACK_MESSAGE", { eventType, hasProps: !!props, hasInfo: !!props.info })
+      logger.debug("TRACK_MESSAGE", { eventType, hasProps: !!props, hasInfo: !!props.info })
       const info = props.info
       if (!info?.sessionID || !info?.id) return
 
@@ -515,7 +520,7 @@ const handleEvent = async (event: any) => {
         }
 
         if (state.processedPartIDs.has(part.id)) {
-          logger.warn("[DEBUG] SKIPPING message.part.updated - part already processed via delta", {
+          logger.debug("Skipping message.part.updated because part was already processed via delta", {
             sessionId: part.sessionID,
             partId: part.id,
             textLength: part.text.length,
@@ -526,7 +531,7 @@ const handleEvent = async (event: any) => {
 
         state.processedPartIDs.add(part.id)
 
-        logger.warn("[DEBUG] Adding text via message.part.updated", {
+        logger.debug("Adding text via message.part.updated", {
           sessionId: part.sessionID,
           messageId: part.messageID,
           partId: part.id,
@@ -618,10 +623,10 @@ const handleEvent = async (event: any) => {
       const lastPart = state.textParts.length > 0 ? state.textParts[state.textParts.length - 1] : null
       const isFirstDeltaForPart = !state.processedPartIDs.has(partID)
 
-      logger.warn("[DEBUG] Adding text via message.part.delta", {
-        sessionId: sessionID,
-        messageId: messageID,
-        partId: partID,
+        logger.debug("Adding text via message.part.delta", {
+          sessionId: sessionID,
+          messageId: messageID,
+          partId: partID,
         deltaLength: delta.length,
         deltaPreview: delta.substring(0, 100),
         currentTextPartsCount: state.textParts.length,
@@ -636,7 +641,7 @@ const handleEvent = async (event: any) => {
 
       if (state.textParts.length > 0) {
         state.textParts[state.textParts.length - 1] += delta
-        logger.warn("[DEBUG] Appended delta to existing text part", {
+        logger.debug("Appended delta to existing text part", {
           sessionId: sessionID,
           partId: partID,
           newLength: state.textParts[state.textParts.length - 1].length,
@@ -646,7 +651,7 @@ const handleEvent = async (event: any) => {
       }
 
       state.textParts.push(delta)
-      logger.warn("[DEBUG] Pushed new text part from delta (was empty)", {
+      logger.debug("Pushed new text part from delta", {
         sessionId: sessionID,
         partId: partID,
       })
@@ -668,7 +673,7 @@ const handleEvent = async (event: any) => {
 
       const state = sessionRegistry.get(sessionID)
       if (!state) {
-        logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
+        logger.debug("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
         return
       }
 
@@ -693,7 +698,7 @@ const handleEvent = async (event: any) => {
 
       const state = sessionRegistry.get(sessionID)
       if (!state) {
-        logger.warn("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
+        logger.debug("No registered state for session", { sessionID, registeredSessions: Array.from(sessionRegistry.keys()) })
         return
       }
 
